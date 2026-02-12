@@ -2,4 +2,5 @@
 Simple Recorer & Spectrum Viewer
 
 
-https://github.com/6K5EUQ/BE_WE.git
+```bash
+https://github.com/6K5EUQ/BladeRF_1.git
