@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/Simple_Recorder.dir/src/main.cpp.o -o Simple_Recorder  -lbladeRF 

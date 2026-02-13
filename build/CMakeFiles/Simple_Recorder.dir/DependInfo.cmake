@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/dsa/bewe/BE_WE/src/main.cpp" "CMakeFiles/be_we.dir/src/main.cpp.o" "gcc" "CMakeFiles/be_we.dir/src/main.cpp.o.d"
+  "/home/dsa/BE_WE/BladeRF_1/src/main.cpp" "CMakeFiles/Simple_Recorder.dir/src/main.cpp.o" "gcc" "CMakeFiles/Simple_Recorder.dir/src/main.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

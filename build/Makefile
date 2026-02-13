@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/dsa/bewe/BE_WE
+CMAKE_SOURCE_DIR = /home/dsa/BE_WE/BladeRF_1
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/dsa/bewe/BE_WE/build
+CMAKE_BINARY_DIR = /home/dsa/BE_WE/BladeRF_1/build
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -87,9 +87,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/dsa/bewe/BE_WE/build/CMakeFiles /home/dsa/bewe/BE_WE/build//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/dsa/BE_WE/BladeRF_1/build/CMakeFiles /home/dsa/BE_WE/BladeRF_1/build//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/dsa/bewe/BE_WE/build/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/dsa/BE_WE/BladeRF_1/build/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -117,24 +117,24 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named be_we
+# Target rules for targets named Simple_Recorder
 
 # Build rule for target.
-be_we: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 be_we
-.PHONY : be_we
+Simple_Recorder: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 Simple_Recorder
+.PHONY : Simple_Recorder
 
 # fast build rule for target.
-be_we/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/be_we.dir/build.make CMakeFiles/be_we.dir/build
-.PHONY : be_we/fast
+Simple_Recorder/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Simple_Recorder.dir/build.make CMakeFiles/Simple_Recorder.dir/build
+.PHONY : Simple_Recorder/fast
 
 src/main.o: src/main.cpp.o
 .PHONY : src/main.o
 
 # target to build an object file
 src/main.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/be_we.dir/build.make CMakeFiles/be_we.dir/src/main.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Simple_Recorder.dir/build.make CMakeFiles/Simple_Recorder.dir/src/main.cpp.o
 .PHONY : src/main.cpp.o
 
 src/main.i: src/main.cpp.i
@@ -142,7 +142,7 @@ src/main.i: src/main.cpp.i
 
 # target to preprocess a source file
 src/main.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/be_we.dir/build.make CMakeFiles/be_we.dir/src/main.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Simple_Recorder.dir/build.make CMakeFiles/Simple_Recorder.dir/src/main.cpp.i
 .PHONY : src/main.cpp.i
 
 src/main.s: src/main.cpp.s
@@ -150,7 +150,7 @@ src/main.s: src/main.cpp.s
 
 # target to generate assembly for a file
 src/main.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/be_we.dir/build.make CMakeFiles/be_we.dir/src/main.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Simple_Recorder.dir/build.make CMakeFiles/Simple_Recorder.dir/src/main.cpp.s
 .PHONY : src/main.cpp.s
 
 # Help Target
@@ -161,7 +161,7 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
-	@echo "... be_we"
+	@echo "... Simple_Recorder"
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"

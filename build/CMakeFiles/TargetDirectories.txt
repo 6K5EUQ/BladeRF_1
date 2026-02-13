@@ -1,3 +1,3 @@
-/home/dsa/bewe/BE_WE/build/CMakeFiles/be_we.dir
-/home/dsa/bewe/BE_WE/build/CMakeFiles/edit_cache.dir
-/home/dsa/bewe/BE_WE/build/CMakeFiles/rebuild_cache.dir
+/home/dsa/BE_WE/BladeRF_1/build/CMakeFiles/Simple_Recorder.dir
+/home/dsa/BE_WE/BladeRF_1/build/CMakeFiles/edit_cache.dir
+/home/dsa/BE_WE/BladeRF_1/build/CMakeFiles/rebuild_cache.dir

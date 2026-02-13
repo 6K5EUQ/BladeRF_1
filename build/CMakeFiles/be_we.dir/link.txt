@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/be_we.dir/src/main.cpp.o -o be_we  -lbladeRF 

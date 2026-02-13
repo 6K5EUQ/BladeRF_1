@@ -1,7 +1,7 @@
-CMakeFiles/be_we.dir/src/main.cpp.o: /home/dsa/bewe/BE_WE/src/main.cpp \
- /usr/include/stdc-predef.h /usr/local/include/libbladeRF.h \
- /usr/include/inttypes.h /usr/include/features.h \
- /usr/include/features-time64.h \
+CMakeFiles/Simple_Recorder.dir/src/main.cpp.o: \
+ /home/dsa/BE_WE/BladeRF_1/src/main.cpp /usr/include/stdc-predef.h \
+ /usr/local/include/libbladeRF.h /usr/include/inttypes.h \
+ /usr/include/features.h /usr/include/features-time64.h \
  /usr/include/x86_64-linux-gnu/bits/wordsize.h \
  /usr/include/x86_64-linux-gnu/bits/timesize.h \
  /usr/include/x86_64-linux-gnu/sys/cdefs.h \
