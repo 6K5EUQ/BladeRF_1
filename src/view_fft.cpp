@@ -47,17 +47,11 @@ public:
     std::chrono::steady_clock::time_point play_start_time;
     double total_duration = 0.0;
     
-    std::vector<std::vector<float>> waterfall_line_cache;
-    float last_cached_freq_pan = -999.0f;
-    float last_cached_freq_zoom = -999.0f;
-    int last_cached_num_pixels = -1;
-    
     std::vector<std::vector<float>> waterfall_precomputed;
     std::atomic<bool> precompute_done{false};
     std::atomic<int> precompute_progress{0};
     std::atomic<bool> precompute_requested{true};
-    
-    int last_precompute_window_width = 0;
+    int precomputed_num_pixels = 1360;  // ← precompute된 실제 픽셀 크기
     
     std::vector<float> spectrum_cache;
     int cached_spectrum_idx = -1;
@@ -103,7 +97,6 @@ public:
         
         total_duration = (static_cast<double>(header.num_ffts) * header.fft_size) / header.sample_rate;
         
-        waterfall_line_cache.resize(header.num_ffts);
         waterfall_precomputed.resize(header.num_ffts);
         last_input_time = std::chrono::steady_clock::now();
         
@@ -115,6 +108,7 @@ public:
         float nyquist = header.sample_rate / 2.0f / 1e6f;
         float total_range = 2.0f * nyquist;
         int num_pixels = window_width - 40;
+        precomputed_num_pixels = num_pixels;  // ← 실제 크기 저장
         
         float visible_bins = header.fft_size / 1.0f;
         int bin_skip = std::max(1, static_cast<int>(visible_bins / num_pixels));
@@ -147,7 +141,6 @@ public:
             precompute_progress = ((fft_idx + 1) * 100) / header.num_ffts;
         }
         
-        last_precompute_window_width = window_width;
         precompute_done = true;
     }
 
@@ -358,26 +351,8 @@ public:
         disp_end = std::min(nyquist, disp_end);
 
         int display_rows = std::min(static_cast<int>(header.num_ffts), static_cast<int>(plot_size.y / 1));
-
         float sr_mhz = header.sample_rate / 1e6f;
         int num_pixels = static_cast<int>(plot_size.x);
-
-        float visible_bins = header.fft_size / freq_zoom;
-        int bin_skip = std::max(1, static_cast<int>(visible_bins / num_pixels));
-
-        bool use_cache = (last_cached_freq_pan == freq_pan && 
-                         last_cached_freq_zoom == freq_zoom &&
-                         last_cached_num_pixels == num_pixels);
-
-        if (!use_cache && precompute_done) {
-            for (int fft_idx = 0; fft_idx < static_cast<int>(header.num_ffts); fft_idx++) {
-                waterfall_line_cache[fft_idx].assign(num_pixels, -1e10f);
-                compute_fft_line(fft_idx, num_pixels, bin_skip, sr_mhz, disp_start, disp_end, waterfall_line_cache[fft_idx]);
-            }
-            last_cached_freq_pan = freq_pan;
-            last_cached_freq_zoom = freq_zoom;
-            last_cached_num_pixels = num_pixels;
-        }
 
         bool power_changed = (last_cached_power_min != display_power_min || 
                              last_cached_power_max != display_power_max);
@@ -390,16 +365,22 @@ public:
             float row_y = plot_pos.y + (display_rows - 1 - display_row) * plot_size.y / display_rows;
             float row_h = plot_size.y / display_rows;
 
-            bool freq_modified = (freq_zoom != 1.0f || freq_pan != 0.0f);
-            std::vector<float>& line_data = (precompute_done && !freq_modified) ? waterfall_precomputed[fft_idx] : waterfall_line_cache[fft_idx];
+            std::vector<float>& line_data = waterfall_precomputed[fft_idx];
 
-            for (int px = 0; px < num_pixels && px < static_cast<int>(line_data.size()); px++) {
-                float power_range = display_power_max - display_power_min;
-                float np = (line_data[px] - display_power_min) / power_range;
-                np = std::max(0.0f, std::min(1.0f, np));
+            for (int px = 0; px < num_pixels; px++) {
+                float freq_at_px = disp_start + (px / static_cast<float>(num_pixels)) * (disp_end - disp_start);
+                
+                int precomp_bin = static_cast<int>((freq_at_px + nyquist) / (2.0f * nyquist) * precomputed_num_pixels);
+                precomp_bin = std::max(0, std::min(precomputed_num_pixels - 1, precomp_bin));
+                
+                if (precomp_bin >= 0 && precomp_bin < static_cast<int>(line_data.size())) {
+                    float power_range = display_power_max - display_power_min;
+                    float np = (line_data[precomp_bin] - display_power_min) / power_range;
+                    np = std::max(0.0f, std::min(1.0f, np));
 
-                float bx = plot_pos.x + px;
-                draw_list->AddRectFilled(ImVec2(bx, row_y), ImVec2(bx + 1, row_y + row_h), get_color(np));
+                    float bx = plot_pos.x + px;
+                    draw_list->AddRectFilled(ImVec2(bx, row_y), ImVec2(bx + 1, row_y + row_h), get_color(np));
+                }
             }
         }
         
@@ -416,10 +397,7 @@ public:
             mx = std::max(0.0f, std::min(1.0f, mx));
             
             if (io.MouseWheel != 0.0f) {
-                float nyquist = header.sample_rate / 2.0f / 1e6f;
-                float total_range = 2.0f * nyquist;
-                float disp_start = -nyquist + freq_pan * total_range;
-                float freq_mouse = disp_start + mx * (total_range / freq_zoom);
+                float freq_mouse = disp_start + mx * (disp_end - disp_start);
                 
                 freq_zoom *= (1.0f + io.MouseWheel * 0.1f);
                 freq_zoom = std::max(1.0f, std::min(10.0f, freq_zoom));
@@ -602,9 +580,6 @@ int main(int argc, char *argv[]) {
         
         if (dw != last_window_width && viewer.precompute_done && dw > 100) {
             last_window_width = dw;
-            viewer.last_cached_freq_pan = -999.0f;
-            viewer.last_cached_freq_zoom = -999.0f;
-            viewer.last_cached_num_pixels = -1;
             if (resize_thread != nullptr && resize_thread->joinable()) {
                 resize_thread->join();
                 delete resize_thread;
