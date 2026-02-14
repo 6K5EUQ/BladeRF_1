@@ -1,4 +1,4 @@
-CMakeFiles/view_fft.dir/usr/include/imgui/imgui_demo.cpp.o: \
+CMakeFiles/fft_analyzer.dir/usr/include/imgui/imgui_demo.cpp.o: \
  /usr/include/imgui/imgui_demo.cpp /usr/include/stdc-predef.h \
  /usr/include/imgui/imgui.h /usr/include/imgui/imconfig.h \
  /usr/lib/gcc/x86_64-linux-gnu/13/include/float.h \

@@ -1,2 +1,2 @@
-# Empty dependencies file for record_with_fft.
+# Empty dependencies file for fft_analyzer.
 # This may be replaced when dependencies are built.

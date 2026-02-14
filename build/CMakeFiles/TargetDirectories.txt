@@ -1,4 +1,4 @@
-/home/dsa/BE_WE/SDR Recorder/build/CMakeFiles/record_with_fft.dir
+/home/dsa/BE_WE/SDR Recorder/build/CMakeFiles/fft_analyzer.dir
 /home/dsa/BE_WE/SDR Recorder/build/CMakeFiles/view_fft.dir
 /home/dsa/BE_WE/SDR Recorder/build/CMakeFiles/edit_cache.dir
 /home/dsa/BE_WE/SDR Recorder/build/CMakeFiles/rebuild_cache.dir

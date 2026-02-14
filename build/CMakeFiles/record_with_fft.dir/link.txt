@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/record_with_fft.dir/src/record_with_fft.cpp.o -o record_with_fft  -lbladeRF -lfftw3f 

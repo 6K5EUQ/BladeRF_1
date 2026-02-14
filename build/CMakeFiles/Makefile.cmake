@@ -116,8 +116,6 @@ set(CMAKE_MAKEFILE_DEPENDS
   "/usr/share/cmake-3.28/Modules/Platform/Linux.cmake"
   "/usr/share/cmake-3.28/Modules/Platform/UnixPaths.cmake"
   "/usr/share/cmake-3.28/Modules/SelectLibraryConfigurations.cmake"
-  "/usr/share/cmake/glm/glmConfig.cmake"
-  "/usr/share/cmake/glm/glmConfigVersion.cmake"
   )
 
 # The corresponding makefile is:
@@ -138,6 +136,6 @@ set(CMAKE_MAKEFILE_PRODUCTS
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
-  "CMakeFiles/record_with_fft.dir/DependInfo.cmake"
+  "CMakeFiles/fft_analyzer.dir/DependInfo.cmake"
   "CMakeFiles/view_fft.dir/DependInfo.cmake"
   )

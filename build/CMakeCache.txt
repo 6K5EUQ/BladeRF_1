@@ -287,9 +287,6 @@ PKG_CONFIG_EXECUTABLE:FILEPATH=/usr/bin/pkg-config
 //The directory containing a CMake configuration file for glfw3.
 glfw3_DIR:PATH=/usr/lib/x86_64-linux-gnu/cmake/glfw3
 
-//The directory containing a CMake configuration file for glm.
-glm_DIR:PATH=/usr/share/cmake/glm
-
 //Path to a library.
 pkgcfg_lib_BLADERF_bladeRF:FILEPATH=/usr/local/lib/libbladeRF.so
 

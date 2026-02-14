@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = 
 
-CXX_INCLUDES = 
+CXX_INCLUDES = -I/usr/include/imgui -I/usr/include/imgui/backends
 
-CXX_FLAGS = -std=gnu++17
+CXX_FLAGS = -std=gnu++17 -O3 -march=native
 

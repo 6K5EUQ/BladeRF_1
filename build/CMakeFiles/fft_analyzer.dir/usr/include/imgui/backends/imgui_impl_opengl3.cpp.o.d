@@ -1,4 +1,4 @@
-CMakeFiles/view_fft.dir/usr/include/imgui/backends/imgui_impl_opengl3.cpp.o: \
+CMakeFiles/fft_analyzer.dir/usr/include/imgui/backends/imgui_impl_opengl3.cpp.o: \
  /usr/include/imgui/backends/imgui_impl_opengl3.cpp \
  /usr/include/stdc-predef.h /usr/include/imgui/imgui.h \
  /usr/include/imgui/imconfig.h \
