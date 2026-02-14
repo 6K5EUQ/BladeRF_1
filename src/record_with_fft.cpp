@@ -16,7 +16,7 @@
 
 #define RX_GAIN       10
 #define CHANNEL       BLADERF_CHANNEL_RX(0)
-#define FFT_SIZE      8192 * 2
+#define FFT_SIZE      8192
 #define TIME_AVERAGE  10
 
 struct WavHeader {
@@ -242,6 +242,8 @@ int main() {
     
     for (size_t fft_idx = 0; fft_idx < num_complete_ffts; fft_idx++) {
         size_t sample_start = fft_idx * FFT_SIZE;
+        
+        if (sample_start + FFT_SIZE > received) break;
         
         for (int j = 0; j < FFT_SIZE; j++) {
             float re = iq[sample_start * 2 + j * 2] / 2048.0f;

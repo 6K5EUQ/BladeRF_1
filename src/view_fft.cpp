@@ -12,6 +12,9 @@
 #include <cmath>
 #include <algorithm>
 #include <string>
+#include <chrono>
+#include <thread>
+#include <atomic>
 
 struct FFTHeader {
     char magic[4];
@@ -32,11 +35,42 @@ public:
     std::vector<int8_t> fft_data;
     
     int current_fft_idx = 0;
+    int fft_index_step = 1;
     float freq_zoom = 1.0f;
     float freq_pan = 0.0f;
     float display_power_min = 0.0f;
     float display_power_max = 0.0f;
     float spectrum_height_ratio = 0.4f;
+    
+    bool is_playing = false;
+    bool is_looping = false;
+    std::chrono::steady_clock::time_point play_start_time;
+    double total_duration = 0.0;
+    
+    std::vector<std::vector<float>> waterfall_line_cache;
+    float last_cached_freq_pan = -999.0f;
+    float last_cached_freq_zoom = -999.0f;
+    int last_cached_num_pixels = -1;
+    
+    std::vector<std::vector<float>> waterfall_precomputed;
+    std::atomic<bool> precompute_done{false};
+    std::atomic<int> precompute_progress{0};
+    std::atomic<bool> precompute_requested{true};
+    
+    int last_precompute_window_width = 0;
+    
+    std::vector<float> spectrum_cache;
+    int cached_spectrum_idx = -1;
+    float cached_spectrum_freq_pan = -999.0f;
+    float cached_spectrum_freq_zoom = -999.0f;
+    int cached_spectrum_pixels = -1;
+    
+    float last_cached_power_min = -999.0f;
+    float last_cached_power_max = -999.0f;
+    
+    std::chrono::steady_clock::time_point last_input_time;
+    bool high_fps_mode = true;
+    
     std::string window_title;
 
     bool load_file(const char *filename) {
@@ -66,7 +100,92 @@ public:
         
         display_power_min = header.power_min;
         display_power_max = header.power_max;
+        
+        total_duration = (static_cast<double>(header.num_ffts) * header.fft_size) / header.sample_rate;
+        
+        waterfall_line_cache.resize(header.num_ffts);
+        waterfall_precomputed.resize(header.num_ffts);
+        last_input_time = std::chrono::steady_clock::now();
+        
         return true;
+    }
+
+    void precompute_waterfall_lines(int window_width = 1400) {
+        float sr_mhz = header.sample_rate / 1e6f;
+        float nyquist = header.sample_rate / 2.0f / 1e6f;
+        float total_range = 2.0f * nyquist;
+        int num_pixels = window_width - 40;
+        
+        float visible_bins = header.fft_size / 1.0f;
+        int bin_skip = std::max(1, static_cast<int>(visible_bins / num_pixels));
+        
+        float disp_start = -nyquist;
+        float disp_end = nyquist;
+        
+        precompute_done = false;
+        precompute_progress = 0;
+        
+        for (int fft_idx = 0; fft_idx < static_cast<int>(header.num_ffts); fft_idx++) {
+            waterfall_precomputed[fft_idx].assign(num_pixels, -1e10f);
+            
+            const int8_t *spec = fft_data.data() + fft_idx * header.fft_size;
+            
+            for (int bin = 0; bin < static_cast<int>(header.fft_size); bin += bin_skip) {
+                float freq = get_freq_from_bin(bin, sr_mhz);
+                
+                if (freq < disp_start || freq > disp_end) continue;
+                
+                float norm_freq = (freq - disp_start) / (disp_end - disp_start);
+                int px = static_cast<int>(norm_freq * num_pixels);
+                
+                if (px >= 0 && px < num_pixels) {
+                    float power = dequantize(spec[bin]);
+                    waterfall_precomputed[fft_idx][px] = std::max(waterfall_precomputed[fft_idx][px], power);
+                }
+            }
+            
+            precompute_progress = ((fft_idx + 1) * 100) / header.num_ffts;
+        }
+        
+        last_precompute_window_width = window_width;
+        precompute_done = true;
+    }
+
+    void update_playback() {
+        if (!is_playing) return;
+        
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - play_start_time).count();
+        
+        if (elapsed >= total_duration) {
+            if (is_looping) {
+                play_start_time = now;
+                elapsed = 0.0;
+            } else {
+                is_playing = false;
+                return;
+            }
+        }
+        
+        double progress = elapsed / total_duration;
+        current_fft_idx = static_cast<int>(progress * (header.num_ffts - 1));
+    }
+
+    void check_adaptive_fps(GLFWwindow* window) {
+        auto now = std::chrono::steady_clock::now();
+        double time_since_input = std::chrono::duration<double>(now - last_input_time).count();
+        
+        if (time_since_input > 0.5 && high_fps_mode) {
+            high_fps_mode = false;
+            glfwSwapInterval(5);
+        } else if (time_since_input <= 0.1 && !high_fps_mode) {
+            high_fps_mode = true;
+            glfwSwapInterval(1);
+        }
+    }
+
+    void register_input() {
+        last_input_time = std::chrono::steady_clock::now();
     }
 
     float get_freq_from_bin(int bin, float sr_mhz) {
@@ -79,14 +198,22 @@ public:
         }
     }
 
-    int get_bin_from_freq(float freq, float sr_mhz) {
-        int n = header.fft_size;
-        if (freq >= 0) {
-            int bin = static_cast<int>(freq * n / sr_mhz + 0.5f);
-            return std::max(0, std::min(n / 2, bin));
-        } else {
-            int bin = static_cast<int>(freq * n / sr_mhz + 0.5f);
-            return std::max(n / 2 + 1, std::min(n - 1, n + bin));
+    void compute_fft_line(int fft_idx, int num_pixels, int bin_skip, float sr_mhz,
+                         float disp_start, float disp_end, std::vector<float>& pixel_powers) {
+        const int8_t *spec = fft_data.data() + fft_idx * header.fft_size;
+        
+        for (int bin = 0; bin < static_cast<int>(header.fft_size); bin += bin_skip) {
+            float freq = get_freq_from_bin(bin, sr_mhz);
+            
+            if (freq < disp_start || freq > disp_end) continue;
+            
+            float norm_freq = (freq - disp_start) / (disp_end - disp_start);
+            int px = static_cast<int>(norm_freq * num_pixels);
+            
+            if (px >= 0 && px < num_pixels) {
+                float power = dequantize(spec[bin]);
+                pixel_powers[px] = std::max(pixel_powers[px], power);
+            }
         }
     }
 
@@ -121,31 +248,42 @@ public:
         draw_freq_grid(draw_list, plot_pos, plot_size, disp_start, disp_end);
 
         float sr_mhz = header.sample_rate / 1e6f;
-        int start_bin = get_bin_from_freq(disp_start, sr_mhz);
-        int end_bin = get_bin_from_freq(disp_end, sr_mhz);
+        int num_pixels = static_cast<int>(plot_size.x);
         
-        if (start_bin > end_bin) std::swap(start_bin, end_bin);
-        end_bin = std::min(end_bin + 1, static_cast<int>(header.fft_size));
+        bool use_spectrum_cache = (cached_spectrum_idx == current_fft_idx &&
+                                  cached_spectrum_freq_pan == freq_pan &&
+                                  cached_spectrum_freq_zoom == freq_zoom &&
+                                  cached_spectrum_pixels == num_pixels);
+        
+        if (!use_spectrum_cache) {
+            spectrum_cache.assign(num_pixels, -1e10f);
+            for (int bin = 0; bin < static_cast<int>(header.fft_size); bin++) {
+                float freq = get_freq_from_bin(bin, sr_mhz);
+                
+                if (freq < disp_start || freq > disp_end) continue;
+                
+                float norm_freq = (freq - disp_start) / (disp_end - disp_start);
+                int px = static_cast<int>(norm_freq * num_pixels);
+                
+                if (px >= 0 && px < num_pixels) {
+                    float power = dequantize(spectrum[bin]);
+                    spectrum_cache[px] = std::max(spectrum_cache[px], power);
+                }
+            }
+            cached_spectrum_idx = current_fft_idx;
+            cached_spectrum_freq_pan = freq_pan;
+            cached_spectrum_freq_zoom = freq_zoom;
+            cached_spectrum_pixels = num_pixels;
+        }
 
-        for (int bin = start_bin; bin < end_bin - 1; bin++) {
-            float freq1 = get_freq_from_bin(bin, sr_mhz);
-            float freq2 = get_freq_from_bin(bin + 1, sr_mhz);
-            
-            float norm_freq1 = (freq1 - disp_start) / (disp_end - disp_start);
-            float norm_freq2 = (freq2 - disp_start) / (disp_end - disp_start);
-            
-            norm_freq1 = std::max(0.0f, std::min(1.0f, norm_freq1));
-            norm_freq2 = std::max(0.0f, std::min(1.0f, norm_freq2));
-
-            float p1 = dequantize(spectrum[bin]);
-            float p2 = dequantize(spectrum[bin + 1]);
-            float np1 = (p1 - display_power_min) / power_range;
-            float np2 = (p2 - display_power_min) / power_range;
+        for (int px = 0; px < num_pixels - 1; px++) {
+            float np1 = (spectrum_cache[px] - display_power_min) / power_range;
+            float np2 = (spectrum_cache[px + 1] - display_power_min) / power_range;
             np1 = std::max(0.0f, std::min(1.0f, np1));
             np2 = std::max(0.0f, std::min(1.0f, np2));
 
-            float x1 = plot_pos.x + norm_freq1 * plot_size.x;
-            float x2 = plot_pos.x + norm_freq2 * plot_size.x;
+            float x1 = plot_pos.x + px;
+            float x2 = plot_pos.x + px + 1;
             float y1 = plot_pos.y + plot_size.y * (1.0f - np1);
             float y2 = plot_pos.y + plot_size.y * (1.0f - np2);
 
@@ -161,6 +299,7 @@ public:
             float freq_mouse = disp_start + mx * (disp_end - disp_start);
             
             if (io.MouseWheel != 0.0f) {
+                register_input();
                 freq_zoom *= (1.0f + io.MouseWheel * 0.1f);
                 freq_zoom = std::max(1.0f, std::min(10.0f, freq_zoom));
                 
@@ -218,36 +357,77 @@ public:
         disp_start = std::max(-nyquist, disp_start);
         disp_end = std::min(nyquist, disp_end);
 
-        int display_rows = std::min(static_cast<int>(header.num_ffts), static_cast<int>(plot_size.y / 2));
-        int start_row = current_fft_idx - display_rows + 1;
-        if (start_row < 0) start_row = 0;
+        int display_rows = std::min(static_cast<int>(header.num_ffts), static_cast<int>(plot_size.y / 1));
 
         float sr_mhz = header.sample_rate / 1e6f;
-        int start_bin = get_bin_from_freq(disp_start, sr_mhz);
-        int end_bin = get_bin_from_freq(disp_end, sr_mhz);
-        
-        if (start_bin > end_bin) std::swap(start_bin, end_bin);
-        end_bin = std::min(end_bin + 1, static_cast<int>(header.fft_size));
+        int num_pixels = static_cast<int>(plot_size.x);
 
-        float bin_to_x_scale = plot_size.x / (end_bin - start_bin);
+        float visible_bins = header.fft_size / freq_zoom;
+        int bin_skip = std::max(1, static_cast<int>(visible_bins / num_pixels));
 
-        for (int row = 0; row < display_rows; row++) {
-            int fft_idx = start_row + row;
-            if (fft_idx < 0 || fft_idx >= static_cast<int>(header.num_ffts)) continue;
+        bool use_cache = (last_cached_freq_pan == freq_pan && 
+                         last_cached_freq_zoom == freq_zoom &&
+                         last_cached_num_pixels == num_pixels);
 
-            const int8_t *spec = fft_data.data() + fft_idx * header.fft_size;
-            float row_y = plot_pos.y + (display_rows - 1 - row) * plot_size.y / display_rows;
+        if (!use_cache && precompute_done) {
+            for (int fft_idx = 0; fft_idx < static_cast<int>(header.num_ffts); fft_idx++) {
+                waterfall_line_cache[fft_idx].assign(num_pixels, -1e10f);
+                compute_fft_line(fft_idx, num_pixels, bin_skip, sr_mhz, disp_start, disp_end, waterfall_line_cache[fft_idx]);
+            }
+            last_cached_freq_pan = freq_pan;
+            last_cached_freq_zoom = freq_zoom;
+            last_cached_num_pixels = num_pixels;
+        }
+
+        bool power_changed = (last_cached_power_min != display_power_min || 
+                             last_cached_power_max != display_power_max);
+
+        for (int display_row = 0; display_row < display_rows; display_row++) {
+            int fft_idx = current_fft_idx - display_rows + 1 + display_row;
+            
+            if (fft_idx < 0 || fft_idx > current_fft_idx) continue;
+
+            float row_y = plot_pos.y + (display_rows - 1 - display_row) * plot_size.y / display_rows;
             float row_h = plot_size.y / display_rows;
 
-            for (int bin = start_bin; bin < end_bin; bin++) {
-                float p = dequantize(spec[bin]);
+            bool freq_modified = (freq_zoom != 1.0f || freq_pan != 0.0f);
+            std::vector<float>& line_data = (precompute_done && !freq_modified) ? waterfall_precomputed[fft_idx] : waterfall_line_cache[fft_idx];
+
+            for (int px = 0; px < num_pixels && px < static_cast<int>(line_data.size()); px++) {
                 float power_range = display_power_max - display_power_min;
-                float np = (p - display_power_min) / power_range;
+                float np = (line_data[px] - display_power_min) / power_range;
                 np = std::max(0.0f, std::min(1.0f, np));
 
-                float bx = plot_pos.x + (bin - start_bin) * bin_to_x_scale;
-                float bw = bin_to_x_scale + 1.0f;
-                draw_list->AddRectFilled(ImVec2(bx, row_y), ImVec2(bx + bw, row_y + row_h), get_color(np));
+                float bx = plot_pos.x + px;
+                draw_list->AddRectFilled(ImVec2(bx, row_y), ImVec2(bx + 1, row_y + row_h), get_color(np));
+            }
+        }
+        
+        if (power_changed) {
+            last_cached_power_min = display_power_min;
+            last_cached_power_max = display_power_max;
+        }
+        
+        ImGui::InvisibleButton("waterfall_canvas", plot_size);
+        if (ImGui::IsItemHovered()) {
+            ImGuiIO& io = ImGui::GetIO();
+            ImVec2 mouse = ImGui::GetMousePos();
+            float mx = (mouse.x - plot_pos.x) / plot_size.x;
+            mx = std::max(0.0f, std::min(1.0f, mx));
+            
+            if (io.MouseWheel != 0.0f) {
+                float nyquist = header.sample_rate / 2.0f / 1e6f;
+                float total_range = 2.0f * nyquist;
+                float disp_start = -nyquist + freq_pan * total_range;
+                float freq_mouse = disp_start + mx * (total_range / freq_zoom);
+                
+                freq_zoom *= (1.0f + io.MouseWheel * 0.1f);
+                freq_zoom = std::max(1.0f, std::min(10.0f, freq_zoom));
+                
+                float new_width = total_range / freq_zoom;
+                float new_start = freq_mouse - (mx * new_width);
+                freq_pan = (new_start + nyquist) / total_range;
+                freq_pan = std::max(0.0f, std::min(1.0f - 1.0f / freq_zoom, freq_pan));
             }
         }
     }
@@ -292,77 +472,163 @@ int main(int argc, char *argv[]) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
+    std::thread precompute_thread(&FFTViewer::precompute_waterfall_lines, &viewer, 1400);
+
+    bool show_loading = true;
+    int last_window_width = 1400;
+    std::thread* resize_thread = nullptr;
+
     while (!glfwWindowShouldClose(window)) {
+        viewer.check_adaptive_fps(window);
+        
         glfwPollEvents();
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-
-        if (ImGui::Begin("FFT Viewer", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
-            if (ImGui::SliderInt("FFT Index", &viewer.current_fft_idx, 0, viewer.header.num_ffts - 1)) {}
-            ImGui::Separator();
-
-            float w = ImGui::GetContentRegionAvail().x;
-            float total_h = ImGui::GetIO().DisplaySize.y - 140;
-            float divider_h = 10.0f;
-            float h1 = (total_h - divider_h) * viewer.spectrum_height_ratio;
-            float h2 = (total_h - divider_h) * (1.0f - viewer.spectrum_height_ratio);
-
-            if (ImGui::CollapsingHeader("Power Spectrum", ImGuiTreeNodeFlags_DefaultOpen)) {
-                viewer.draw_spectrum(w, h1);
-            }
+        if (!viewer.precompute_done) {
+            ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f - 150, ImGui::GetIO().DisplaySize.y * 0.5f - 50));
+            ImGui::SetNextWindowSize(ImVec2(300, 100));
+            ImGui::Begin("Loading Waterfall Data", &show_loading, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
             
-            ImVec2 divider_pos = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton("divider", ImVec2(w, divider_h));
+            ImGui::Text("Precomputing waterfall lines...");
+            ImGui::ProgressBar(viewer.precompute_progress / 100.0f, ImVec2(-1, 0));
+            ImGui::Text("%d%%", viewer.precompute_progress.load());
             
-            ImDrawList *draw_list = ImGui::GetWindowDrawList();
-            draw_list->AddLine(ImVec2(divider_pos.x, divider_pos.y + divider_h/2), 
-                              ImVec2(divider_pos.x + w, divider_pos.y + divider_h/2), 
-                              IM_COL32(100, 100, 100, 200), 2.0f);
-            
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-            }
-            
-            if (ImGui::IsItemActive()) {
-                ImGuiIO& io = ImGui::GetIO();
-                float delta = io.MouseDelta.y;
-                viewer.spectrum_height_ratio += delta / total_h;
-                viewer.spectrum_height_ratio = std::max(0.2f, std::min(0.8f, viewer.spectrum_height_ratio));
-            }
-            
-            if (ImGui::CollapsingHeader("Waterfall", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::PushItemWidth(25);
-                ImGui::VSliderFloat("##max", ImVec2(25, h2 * 0.45f), &viewer.display_power_max, 
-                                   viewer.header.power_min, viewer.header.power_max, "");
-                ImGui::SameLine();
-                
-                ImDrawList *wf_draw = ImGui::GetWindowDrawList();
-                ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
-                ImVec2 canvas_size(w - 40, h2);
-                
-                viewer.draw_waterfall_canvas(wf_draw, canvas_pos, canvas_size);
-                ImGui::InvisibleButton("waterfall", canvas_size);
-                
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() - h2 * 0.45f);
-                ImGui::VSliderFloat("##min", ImVec2(25, h2 * 0.45f), &viewer.display_power_min, 
-                                   viewer.header.power_min, viewer.header.power_max, "");
-                ImGui::PopItemWidth();
-            }
             ImGui::End();
+        } else {
+            viewer.update_playback();
+
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+
+            if (ImGui::Begin("FFT Viewer", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+                ImGui::BeginGroup();
+                
+                if (ImGui::Button(viewer.is_playing ? "PAUSE##play" : "PLAY##play", ImVec2(50, 0))) {
+                    viewer.register_input();
+                    if (viewer.is_playing) {
+                        viewer.is_playing = false;
+                    } else {
+                        viewer.is_playing = true;
+                        viewer.play_start_time = std::chrono::steady_clock::now();
+                    }
+                }
+                
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, viewer.is_looping ? ImVec4(0.0f, 0.7f, 0.0f, 1.0f) : ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                if (ImGui::Button("LOOP##loop", ImVec2(50, 0))) {
+                    viewer.register_input();
+                    viewer.is_looping = !viewer.is_looping;
+                }
+                ImGui::PopStyleColor();
+                
+                ImGui::SameLine();
+                ImGui::SliderInt("FFT Index", &viewer.current_fft_idx, 0, viewer.header.num_ffts - 1);
+                
+                if (ImGui::IsItemHovered()) {
+                    ImGuiIO& io = ImGui::GetIO();
+                    if (io.MouseWheel != 0.0f && !viewer.is_playing) {
+                        viewer.register_input();
+                        int delta = static_cast<int>(io.MouseWheel) * viewer.fft_index_step;
+                        viewer.current_fft_idx += delta;
+                        viewer.current_fft_idx = std::max(0, std::min(static_cast<int>(viewer.header.num_ffts - 1), viewer.current_fft_idx));
+                    }
+                }
+                
+                ImGui::SameLine();
+                ImGui::PushItemWidth(30);
+                ImGui::InputInt("##step", &viewer.fft_index_step, 0, 0);
+                viewer.fft_index_step = std::max(1, viewer.fft_index_step);
+                ImGui::PopItemWidth();
+                
+                ImGui::EndGroup();
+                ImGui::Separator();
+
+                float w = ImGui::GetContentRegionAvail().x;
+                float total_h = ImGui::GetIO().DisplaySize.y - 140;
+                float divider_h = 10.0f;
+                float h1 = (total_h - divider_h) * viewer.spectrum_height_ratio;
+                float h2 = (total_h - divider_h) * (1.0f - viewer.spectrum_height_ratio);
+
+                if (ImGui::CollapsingHeader("Power Spectrum", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    viewer.draw_spectrum(w, h1);
+                }
+                
+                ImVec2 divider_pos = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("divider", ImVec2(w, divider_h));
+                
+                ImDrawList *draw_list = ImGui::GetWindowDrawList();
+                draw_list->AddLine(ImVec2(divider_pos.x, divider_pos.y + divider_h/2), 
+                                  ImVec2(divider_pos.x + w, divider_pos.y + divider_h/2), 
+                                  IM_COL32(100, 100, 100, 200), 2.0f);
+                
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                }
+                
+                if (ImGui::IsItemActive()) {
+                    viewer.register_input();
+                    ImGuiIO& io = ImGui::GetIO();
+                    float delta = io.MouseDelta.y;
+                    viewer.spectrum_height_ratio += delta / total_h;
+                    viewer.spectrum_height_ratio = std::max(0.2f, std::min(0.8f, viewer.spectrum_height_ratio));
+                }
+                
+                if (ImGui::CollapsingHeader("Waterfall", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::PushItemWidth(25);
+                    ImGui::VSliderFloat("##max", ImVec2(25, h2 * 0.45f), &viewer.display_power_max, 
+                                       viewer.header.power_max, viewer.header.power_min, "");
+                    ImGui::SameLine();
+                    
+                    ImDrawList *wf_draw = ImGui::GetWindowDrawList();
+                    ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+                    ImVec2 canvas_size(w - 40, h2);
+                    
+                    viewer.draw_waterfall_canvas(wf_draw, canvas_pos, canvas_size);
+                    
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - h2 * 0.45f);
+                    ImGui::VSliderFloat("##min", ImVec2(25, h2 * 0.45f), &viewer.display_power_min, 
+                                       viewer.header.power_max, viewer.header.power_min, "");
+                    ImGui::PopItemWidth();
+                }
+                ImGui::End();
+            }
         }
 
         ImGui::Render();
         int dw, dh;
         glfwGetFramebufferSize(window, &dw, &dh);
+        
+        if (dw != last_window_width && viewer.precompute_done && dw > 100) {
+            last_window_width = dw;
+            viewer.last_cached_freq_pan = -999.0f;
+            viewer.last_cached_freq_zoom = -999.0f;
+            viewer.last_cached_num_pixels = -1;
+            if (resize_thread != nullptr && resize_thread->joinable()) {
+                resize_thread->join();
+                delete resize_thread;
+            }
+            resize_thread = new std::thread(&FFTViewer::precompute_waterfall_lines, &viewer, dw);
+            show_loading = true;
+        }
+        
+        if (!viewer.precompute_done) {
+            show_loading = true;
+        } else {
+            show_loading = false;
+        }
         glViewport(0, 0, dw, dh);
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
+    }
+
+    precompute_thread.join();
+    if (resize_thread != nullptr && resize_thread->joinable()) {
+        resize_thread->join();
+        delete resize_thread;
     }
 
     ImGui_ImplOpenGL3_Shutdown();
