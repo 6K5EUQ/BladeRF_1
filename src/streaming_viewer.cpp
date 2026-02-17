@@ -18,13 +18,17 @@
 #include <thread>
 #include <mutex>
 
-#define RX_GAIN 20
+#define RX_GAIN 30
 #define CHANNEL BLADERF_CHANNEL_RX(0)
 #define FFT_SIZE 8192
 #define TIME_AVERAGE 50
 #define MAX_FFTS_MEMORY 1000
 #define FFT_UPDATE_FPS 15
 #define FFT_UPDATE_INTERVAL_MS (1000 / FFT_UPDATE_FPS)
+
+// ✅ Hann window power gain compensation (1 / power_sum)
+// Hann window: sum(w²) / N ≈ 0.375, 따라서 보정계수 ≈ 2.67
+#define HANN_WINDOW_CORRECTION 2.67f
 
 #define AXIS_LABEL_WIDTH 50
 #define SLIDER_WIDTH 40
@@ -95,17 +99,10 @@ public:
     std::mutex data_mutex;
     int pending_new_fft_idx = -1;
     
-    // auto-scaling 관련 (멤버 변수로 변경)
-    bool is_auto_scaling = true;
-    std::chrono::steady_clock::time_point capture_start_time;
-    float auto_scale_min = 999.0f;
-    float auto_scale_max = -999.0f;
-    
     // 주파수 변경 관련
     float pending_center_freq = 0.0f;
     bool freq_change_requested = false;
     bool freq_change_in_progress = false;
-    bool freq_change_auto_scale = false;
     
     enum ColorMapType { COLORMAP_JET = 0, COLORMAP_COOL = 1, COLORMAP_HOT = 2, COLORMAP_VIRIDIS = 3 };
     ColorMapType color_map = COLORMAP_COOL;
@@ -181,8 +178,8 @@ public:
         header.sample_rate = static_cast<uint32_t>(sample_rate_msps * 1e6);
         header.center_frequency = static_cast<uint64_t>(center_freq_mhz * 1e6);
         header.time_average = TIME_AVERAGE;
-        header.power_min = -40.0f;
-        header.power_max = 30.0f;
+        header.power_min = -80.0f;  // ✅ 고정값
+        header.power_max = -30.0f;    // ✅ 고정값
         header.num_ffts = 0;
         
         fft_data.resize(MAX_FFTS_MEMORY * FFT_SIZE);
@@ -193,8 +190,9 @@ public:
         snprintf(title, sizeof(title), "Real-time FFT Viewer - %.2f MHz", center_freq_mhz);
         window_title = title;
         
-        display_power_min = header.power_min;
-        display_power_max = header.power_max;
+        // ✅ 고정 dBFS 범위: -80 dB ~ 0 dB
+        display_power_min = -80.0f;
+        display_power_max = 0.0f;
         
         fft_in = fftwf_alloc_complex(FFT_SIZE);
         fft_out = fftwf_alloc_complex(FFT_SIZE);
@@ -319,8 +317,6 @@ public:
         int16_t *iq_buffer = new int16_t[FFT_SIZE * 2];
         std::vector<float> power_accum(FFT_SIZE, 0.0f);
         int fft_count = 0;
-        
-        capture_start_time = std::chrono::steady_clock::now();
 
         while (is_running) {
             // 주파수 변경 요청 확인
@@ -336,13 +332,6 @@ public:
                     char title[256];
                     snprintf(title, sizeof(title), "Real-time FFT Viewer - %.2f MHz", pending_center_freq);
                     window_title = title;
-                    
-                    // ✅ 주파수 변경 후 auto-scaling 다시 시작
-                    is_auto_scaling = true;
-                    capture_start_time = std::chrono::steady_clock::now();
-                    auto_scale_min = 999.0f;
-                    auto_scale_max = -999.0f;
-                    printf("Auto-scaling reset for new frequency\n");
                 } else {
                     fprintf(stderr, "Failed to change frequency: %s\n", bladerf_strerror(status));
                 }
@@ -366,7 +355,17 @@ public:
 
             for (int i = 0; i < FFT_SIZE; i++) {
                 float mag_sq = fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1];
-                float power_db = 10.0f * log10(mag_sq + 1e-10f);
+                
+                // ✅ SDR++ 기준 dBFS 계산:
+                // 1. FFT normalization: |X|² / N²
+                float normalized_power = mag_sq / (FFT_SIZE * FFT_SIZE);
+                
+                // 2. Window gain compensation (Hann window)
+                normalized_power *= HANN_WINDOW_CORRECTION;
+                
+                // 3. dBFS 변환 (기준: ±1.0 normalized IQ)
+                float power_db = 10.0f * log10(normalized_power + 1e-10f);
+                
                 power_accum[i] += power_db;
             }
 
@@ -382,29 +381,6 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(data_mutex);
                     
-                    // 자동 스케일링: 1초 동안 min/max 수집
-                    if (is_auto_scaling) {
-                        auto now = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - capture_start_time).count();
-                        
-                        for (int i = 0; i < FFT_SIZE; i++) {
-                            float avg_power = power_accum[i] / fft_count;
-                            auto_scale_max = std::max(auto_scale_max, avg_power);
-                            auto_scale_min = std::min(auto_scale_min, avg_power);  // 각 bin의 최솟값
-                        }
-                        
-                        if (elapsed >= 1000) {
-                            // ✅ 최댓값에 +30%, 최솟값의 평균에 +30%
-                            float max_with_margin = auto_scale_max + (auto_scale_max * 0.3f);
-                            float min_with_margin = auto_scale_min + (fabs(auto_scale_min) * 0.3f);  // +30%
-                            
-                            display_power_min = min_with_margin;
-                            display_power_max = max_with_margin;
-                            is_auto_scaling = false;
-                            printf("Auto scaling applied: %.1f ~ %.1f dB (max+30%%, min avg+30%%)\n", display_power_min, display_power_max);
-                        }
-                    }
-                    
                     for (int i = 0; i < FFT_SIZE; i++) {
                         float avg_power = power_accum[i] / fft_count;
                         float normalized = (avg_power - header.power_min) / (header.power_max - header.power_min);
@@ -412,6 +388,10 @@ public:
                         fft_row[i] = static_cast<int8_t>(normalized * 127);
                         current_spectrum[i] = avg_power;
                     }
+                    
+                    // ✅ 실제 측정 데이터의 최솟값을 화면 범위 최솟값으로 설정
+                    float min_power = *std::min_element(current_spectrum.begin(), current_spectrum.end());
+                    display_power_min = min_power;
                     
                     total_ffts_captured++;
                     current_fft_idx = total_ffts_captured - 1;
@@ -593,6 +573,7 @@ public:
             p1 = std::max(0.0f, std::min(1.0f, p1));
             p2 = std::max(0.0f, std::min(1.0f, p2));
             
+            // ✅ 0dB를 위에, -80dB를 아래에: (1.0f - p1)으로 역전
             ImVec2 p1_screen(graph_x + px, graph_y + (1.0f - p1) * graph_h);
             ImVec2 p2_screen(graph_x + px + 1, graph_y + (1.0f - p2) * graph_h);
             
@@ -601,7 +582,7 @@ public:
 
         for (int i = 0; i <= 10; i++) {
             float norm_pos = (float)i / 10.0f;
-            float y = graph_y + (1.0f - norm_pos) * graph_h;
+            float y = graph_y + (1.0f - norm_pos) * graph_h;  // ✅ 역전: 위부터 아래로
             draw_list->AddLine(ImVec2(graph_x, y), ImVec2(graph_x + graph_w, y), 
                               IM_COL32(60, 60, 60, 100), 1.0f);
         }
@@ -615,9 +596,10 @@ public:
         }
 
         for (int i = 1; i <= 9; i++) {
-            float power_level = display_power_min + (i / 10.0f) * power_range;
+            // ✅ 위부터 아래로: 0 → -80 dB
+            float power_level = 0.0f - (i / 10.0f) * 80.0f;
             float norm_pos = (float)i / 10.0f;
-            float y = graph_y + (1.0f - norm_pos) * graph_h;
+            float y = graph_y + norm_pos * graph_h;
             
             draw_list->AddLine(ImVec2(graph_x - 5, y), ImVec2(graph_x, y), 
                               IM_COL32(100, 100, 100, 200), 1.0f);
