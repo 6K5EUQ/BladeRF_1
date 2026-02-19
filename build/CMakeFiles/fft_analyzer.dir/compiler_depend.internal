@@ -8,15 +8,37 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/GL/glu.h
  /usr/include/GLFW/glfw3.h
  /usr/include/alloca.h
+ /usr/include/alsa/asoundef.h
+ /usr/include/alsa/asoundlib.h
+ /usr/include/alsa/conf.h
+ /usr/include/alsa/control.h
+ /usr/include/alsa/error.h
+ /usr/include/alsa/global.h
+ /usr/include/alsa/hwdep.h
+ /usr/include/alsa/input.h
+ /usr/include/alsa/mixer.h
+ /usr/include/alsa/output.h
+ /usr/include/alsa/pcm.h
+ /usr/include/alsa/rawmidi.h
+ /usr/include/alsa/seq.h
+ /usr/include/alsa/seq_event.h
+ /usr/include/alsa/seq_midi_event.h
+ /usr/include/alsa/seqmid.h
+ /usr/include/alsa/timer.h
+ /usr/include/alsa/ump.h
+ /usr/include/alsa/version.h
  /usr/include/asm-generic/errno-base.h
  /usr/include/asm-generic/errno.h
  /usr/include/assert.h
  /usr/include/c++/13/algorithm
+ /usr/include/c++/13/atomic
  /usr/include/c++/13/backward/binders.h
  /usr/include/c++/13/bit
  /usr/include/c++/13/bits/algorithmfwd.h
  /usr/include/c++/13/bits/alloc_traits.h
  /usr/include/c++/13/bits/allocator.h
+ /usr/include/c++/13/bits/atomic_base.h
+ /usr/include/c++/13/bits/atomic_lockfree_defines.h
  /usr/include/c++/13/bits/basic_ios.h
  /usr/include/c++/13/bits/basic_ios.tcc
  /usr/include/c++/13/bits/basic_string.h
@@ -29,6 +51,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/c++/13/bits/cpp_type_traits.h
  /usr/include/c++/13/bits/cxxabi_forced.h
  /usr/include/c++/13/bits/cxxabi_init_exception.h
+ /usr/include/c++/13/bits/deque.tcc
  /usr/include/c++/13/bits/exception.h
  /usr/include/c++/13/bits/exception_defines.h
  /usr/include/c++/13/bits/exception_ptr.h
@@ -59,6 +82,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/c++/13/bits/refwrap.h
  /usr/include/c++/13/bits/requires_hosted.h
  /usr/include/c++/13/bits/specfun.h
+ /usr/include/c++/13/bits/sstream.tcc
  /usr/include/c++/13/bits/std_abs.h
  /usr/include/c++/13/bits/std_mutex.h
  /usr/include/c++/13/bits/std_thread.h
@@ -66,6 +90,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/c++/13/bits/stl_algobase.h
  /usr/include/c++/13/bits/stl_bvector.h
  /usr/include/c++/13/bits/stl_construct.h
+ /usr/include/c++/13/bits/stl_deque.h
  /usr/include/c++/13/bits/stl_function.h
  /usr/include/c++/13/bits/stl_heap.h
  /usr/include/c++/13/bits/stl_iterator.h
@@ -92,6 +117,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/c++/13/chrono
  /usr/include/c++/13/clocale
  /usr/include/c++/13/cmath
+ /usr/include/c++/13/complex
  /usr/include/c++/13/cstddef
  /usr/include/c++/13/cstdint
  /usr/include/c++/13/cstdio
@@ -102,6 +128,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/c++/13/cwctype
  /usr/include/c++/13/debug/assertions.h
  /usr/include/c++/13/debug/debug.h
+ /usr/include/c++/13/deque
  /usr/include/c++/13/exception
  /usr/include/c++/13/ext/alloc_traits.h
  /usr/include/c++/13/ext/atomicity.h
@@ -121,6 +148,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/c++/13/pstl/glue_algorithm_defs.h
  /usr/include/c++/13/pstl/pstl_config.h
  /usr/include/c++/13/ratio
+ /usr/include/c++/13/sstream
  /usr/include/c++/13/stdexcept
  /usr/include/c++/13/stdlib.h
  /usr/include/c++/13/streambuf
@@ -147,6 +175,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/ctype.h
  /usr/include/endian.h
  /usr/include/errno.h
+ /usr/include/fcntl.h
  /usr/include/features-time64.h
  /usr/include/features.h
  /usr/include/fftw3.h
@@ -155,9 +184,12 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/imgui/imconfig.h
  /usr/include/imgui/imgui.h
  /usr/include/inttypes.h
+ /usr/include/linux/close_range.h
  /usr/include/linux/errno.h
+ /usr/include/linux/falloc.h
  /usr/include/locale.h
  /usr/include/math.h
+ /usr/include/poll.h
  /usr/include/pthread.h
  /usr/include/sched.h
  /usr/include/stdc-predef.h
@@ -167,20 +199,28 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/string.h
  /usr/include/strings.h
  /usr/include/time.h
+ /usr/include/unistd.h
  /usr/include/wchar.h
  /usr/include/wctype.h
  /usr/include/x86_64-linux-gnu/asm/errno.h
  /usr/include/x86_64-linux-gnu/bits/atomic_wide_counter.h
  /usr/include/x86_64-linux-gnu/bits/byteswap.h
+ /usr/include/x86_64-linux-gnu/bits/confname.h
  /usr/include/x86_64-linux-gnu/bits/cpu-set.h
  /usr/include/x86_64-linux-gnu/bits/endian.h
  /usr/include/x86_64-linux-gnu/bits/endianness.h
+ /usr/include/x86_64-linux-gnu/bits/environments.h
  /usr/include/x86_64-linux-gnu/bits/errno.h
+ /usr/include/x86_64-linux-gnu/bits/fcntl-linux.h
+ /usr/include/x86_64-linux-gnu/bits/fcntl.h
+ /usr/include/x86_64-linux-gnu/bits/fcntl2.h
  /usr/include/x86_64-linux-gnu/bits/floatn-common.h
  /usr/include/x86_64-linux-gnu/bits/floatn.h
  /usr/include/x86_64-linux-gnu/bits/flt-eval-method.h
  /usr/include/x86_64-linux-gnu/bits/fp-fast.h
  /usr/include/x86_64-linux-gnu/bits/fp-logb.h
+ /usr/include/x86_64-linux-gnu/bits/getopt_core.h
+ /usr/include/x86_64-linux-gnu/bits/getopt_posix.h
  /usr/include/x86_64-linux-gnu/bits/iscanonical.h
  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
  /usr/include/x86_64-linux-gnu/bits/libm-simd-decl-stubs.h
@@ -190,6 +230,9 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/x86_64-linux-gnu/bits/mathcalls-helper-functions.h
  /usr/include/x86_64-linux-gnu/bits/mathcalls-narrow.h
  /usr/include/x86_64-linux-gnu/bits/mathcalls.h
+ /usr/include/x86_64-linux-gnu/bits/poll.h
+ /usr/include/x86_64-linux-gnu/bits/poll2.h
+ /usr/include/x86_64-linux-gnu/bits/posix_opt.h
  /usr/include/x86_64-linux-gnu/bits/pthread_stack_min-dynamic.h
  /usr/include/x86_64-linux-gnu/bits/pthreadtypes-arch.h
  /usr/include/x86_64-linux-gnu/bits/pthreadtypes.h
@@ -198,6 +241,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/x86_64-linux-gnu/bits/select.h
  /usr/include/x86_64-linux-gnu/bits/select2.h
  /usr/include/x86_64-linux-gnu/bits/setjmp.h
+ /usr/include/x86_64-linux-gnu/bits/stat.h
  /usr/include/x86_64-linux-gnu/bits/stdint-intn.h
  /usr/include/x86_64-linux-gnu/bits/stdint-least.h
  /usr/include/x86_64-linux-gnu/bits/stdint-uintn.h
@@ -212,6 +256,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/x86_64-linux-gnu/bits/strings_fortified.h
  /usr/include/x86_64-linux-gnu/bits/struct_mutex.h
  /usr/include/x86_64-linux-gnu/bits/struct_rwlock.h
+ /usr/include/x86_64-linux-gnu/bits/struct_stat.h
  /usr/include/x86_64-linux-gnu/bits/thread-shared-types.h
  /usr/include/x86_64-linux-gnu/bits/time.h
  /usr/include/x86_64-linux-gnu/bits/time64.h
@@ -234,6 +279,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/x86_64-linux-gnu/bits/types/sigset_t.h
  /usr/include/x86_64-linux-gnu/bits/types/struct_FILE.h
  /usr/include/x86_64-linux-gnu/bits/types/struct___jmp_buf_tag.h
+ /usr/include/x86_64-linux-gnu/bits/types/struct_iovec.h
  /usr/include/x86_64-linux-gnu/bits/types/struct_itimerspec.h
  /usr/include/x86_64-linux-gnu/bits/types/struct_sched_param.h
  /usr/include/x86_64-linux-gnu/bits/types/struct_timespec.h
@@ -244,6 +290,9 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/x86_64-linux-gnu/bits/types/wint_t.h
  /usr/include/x86_64-linux-gnu/bits/typesizes.h
  /usr/include/x86_64-linux-gnu/bits/uintn-identity.h
+ /usr/include/x86_64-linux-gnu/bits/unistd-decl.h
+ /usr/include/x86_64-linux-gnu/bits/unistd.h
+ /usr/include/x86_64-linux-gnu/bits/unistd_ext.h
  /usr/include/x86_64-linux-gnu/bits/waitflags.h
  /usr/include/x86_64-linux-gnu/bits/waitstatus.h
  /usr/include/x86_64-linux-gnu/bits/wchar.h
@@ -267,6 +316,7 @@ CMakeFiles/fft_analyzer.dir/src/streaming_viewer.cpp.o
  /usr/include/x86_64-linux-gnu/gnu/stubs-64.h
  /usr/include/x86_64-linux-gnu/gnu/stubs.h
  /usr/include/x86_64-linux-gnu/sys/cdefs.h
+ /usr/include/x86_64-linux-gnu/sys/poll.h
  /usr/include/x86_64-linux-gnu/sys/select.h
  /usr/include/x86_64-linux-gnu/sys/single_threaded.h
  /usr/include/x86_64-linux-gnu/sys/types.h

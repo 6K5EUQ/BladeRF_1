@@ -17,8 +17,12 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <deque>
+#include <complex>
+#include <alsa/asoundlib.h>
 
-#define RX_GAIN 30
+#define RX_GAIN 10
 #define CHANNEL BLADERF_CHANNEL_RX(0)
 #define DEFAULT_FFT_SIZE 8192
 #define TIME_AVERAGE 50
@@ -54,6 +58,319 @@ void apply_hann_window(fftwf_complex *fft_in, int fft_size) {
         fft_in[i][1] *= window;
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// IQ 복조기  WFM / NFM / AM
+//
+// 파이프라인:
+//   61.44MHz IQ → [NCO 회전] → [IIR 채널 LPF] → [dec256] → 240kHz
+//   → [FM 복조 / AM] → [de-emphasis] → [audio LPF] → [dec5] → 48kHz
+//   → ring buffer (2초) → PA write thread (pa_simple, blocking)
+//
+// SDR++ 방식: audio clock이 소비를 주도
+//   demod는 IQ 도착 즉시 처리 → ring에 push
+//   PA thread는 ring에서 CHUNK 모이면 즉시 write (blocking)
+//   → pa_simple_write가 PA 내부 버퍼 꽉 차면 자동 block = rate control
+// ─────────────────────────────────────────────────────────────────────────
+class IQDemodulator {
+public:
+    enum class Mode { NONE, AM, WFM, NFM };
+
+    std::atomic<bool>  active{false};
+    std::atomic<float> sel_rel_mhz{0.0f};
+    std::atomic<float> sel_bw_mhz{0.2f};
+    std::atomic<int>   mode{(int)Mode::NONE};
+    std::atomic<float> volume{1.0f};
+
+    std::mutex iq_mutex;
+    std::deque<std::vector<std::complex<float>>> iq_queue;
+    static constexpr int MAX_QUEUE = 256;
+
+    std::atomic<bool> running{false};
+    std::thread demod_thread;
+    float sample_rate = 61.44e6f;
+    static constexpr int AUDIO_RATE = 48000;
+
+    std::atomic<int> dbg_pushed{0}, dbg_dropped{0}, dbg_processed{0};
+
+    void start(float sr) {
+        sample_rate = sr;
+        running = true;
+        demod_thread = std::thread(&IQDemodulator::demod_loop, this);
+    }
+    void stop() {
+        running = false;
+        if (demod_thread.joinable()) demod_thread.join();
+    }
+    void push_iq(const int16_t* buf, int n) {
+        if (!active.load()) return;
+        std::vector<std::complex<float>> blk(n);
+        for (int i = 0; i < n; i++)
+            blk[i] = {buf[i*2]/2048.f, buf[i*2+1]/2048.f};
+        std::lock_guard<std::mutex> lk(iq_mutex);
+        if ((int)iq_queue.size() < MAX_QUEUE) {
+            iq_queue.push_back(std::move(blk));
+            dbg_pushed.fetch_add(1);
+        } else {
+            int d = dbg_dropped.fetch_add(1)+1;
+            if (d%500==0) fprintf(stderr,"[DEMOD] dropped=%d\n",d);
+        }
+    }
+
+private:
+    // ── IIR 1차 필터 ─────────────────────────────────────────────────────
+    struct IIR1 {
+        float b0=1,b1=0,a1=0,x1=0,y1=0;
+        float process(float x){float y=b0*x+b1*x1-a1*y1;x1=x;y1=y;return y;}
+        void lpf(float fc){float K=tanf((float)M_PI*fc);b0=b1=K/(1+K);a1=(K-1)/(K+1);}
+        void hpf(float fc){float K=tanf((float)M_PI*fc);b0=1/(1+K);b1=-b0;a1=(K-1)/(K+1);}
+        void reset(){x1=y1=0;}
+    };
+    struct CIIR1 {
+        IIR1 i,q;
+        std::complex<float> process(std::complex<float> x){return{i.process(x.real()),q.process(x.imag())};}
+        void lpf(float fc){i.lpf(fc);q.lpf(fc);}
+        void reset(){i.reset();q.reset();}
+    };
+    // 4단 직렬 (fc 보정 없음 - 채널 LPF용)
+    struct CIIR4 {
+        CIIR1 s[4];
+        std::complex<float> process(std::complex<float> x){for(auto&f:s)x=f.process(x);return x;}
+        void lpf(float fc){if(fc>0.499f)fc=0.499f;for(auto&f:s)f.lpf(fc);}
+        void reset(){for(auto&f:s)f.reset();}
+    };
+    struct IIR4 {
+        IIR1 s[4];
+        float process(float x){for(auto&f:s)x=f.process(x);return x;}
+        void lpf(float fc){if(fc>0.499f)fc=0.499f;for(auto&f:s)f.lpf(fc);}
+        void reset(){for(auto&f:s)f.reset();}
+    };
+
+    // ── demod_loop ────────────────────────────────────────────────────────
+    // pa_simple 직접 write 방식 (gqrx/rtl_fm/csdr 동일)
+    // pa_simple_write: PA 내부 500ms 버퍼 가득 차면 자동 block → rate control
+    // ring/PA thread 불필요, demod thread가 직접 출력
+    void demod_loop() {
+        fprintf(stderr,"[DEMOD] thread started sr=%.0f\n", sample_rate);
+
+        // ALSA 초기화 (SDR++와 동일: rtaudio → ALSA)
+        snd_pcm_t *alsa_pcm = nullptr;
+        snd_pcm_hw_params_t *hw_params = nullptr;
+        int alsa_err;
+        const char *alsa_dev = "default";
+
+        alsa_err = snd_pcm_open(&alsa_pcm, alsa_dev, SND_PCM_STREAM_PLAYBACK, 0);
+        if (alsa_err < 0) { fprintf(stderr,"[ALSA] open failed: %s\n",snd_strerror(alsa_err)); return; }
+
+        snd_pcm_hw_params_alloca(&hw_params);
+        snd_pcm_hw_params_any(alsa_pcm, hw_params);
+        snd_pcm_hw_params_set_access(alsa_pcm, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+        snd_pcm_hw_params_set_format(alsa_pcm, hw_params, SND_PCM_FORMAT_FLOAT_LE);
+        snd_pcm_hw_params_set_channels(alsa_pcm, hw_params, 1);
+        unsigned int rate = AUDIO_RATE;
+        snd_pcm_hw_params_set_rate_near(alsa_pcm, hw_params, &rate, 0);
+        // buffer: 500ms, period: 10ms
+        snd_pcm_uframes_t buf_frames = AUDIO_RATE / 2;
+        snd_pcm_uframes_t per_frames = AUDIO_RATE / 100;
+        snd_pcm_hw_params_set_buffer_size_near(alsa_pcm, hw_params, &buf_frames);
+        snd_pcm_hw_params_set_period_size_near(alsa_pcm, hw_params, &per_frames, 0);
+        alsa_err = snd_pcm_hw_params(alsa_pcm, hw_params);
+        if (alsa_err < 0) { fprintf(stderr,"[ALSA] hw_params failed: %s\n",snd_strerror(alsa_err)); snd_pcm_close(alsa_pcm); return; }
+        snd_pcm_prepare(alsa_pcm);
+        fprintf(stderr,"[ALSA] opened: rate=%u buf=%lu per=%lu\n", rate, buf_frames, per_frames);
+
+        CIIR4 chan_lpf;
+        IIR4  audio_lpf;
+        IIR1  deemph, dc_block;
+        float prev_i=0, prev_q=0, am_dc=0;
+        int   mode_prev=-1, dec1_prev=0, dec2_prev=0;
+
+        using cf = std::complex<float>;
+        std::vector<cf> iq_accum;
+        iq_accum.reserve(1<<21);
+        int rd_idx = 0;
+
+        cf nco(1,0), nco_inc(1,0);
+        float last_rel_hz = 1e30f;
+
+        // ALSA period 단위 누적 버퍼 (480샘플=10ms)
+        static constexpr int ALSA_PERIOD = 480;
+        std::vector<float> audio_buf;
+        std::vector<float> alsa_accum;
+        alsa_accum.reserve(ALSA_PERIOD * 4);
+        audio_buf.reserve(256);
+
+        while (running.load()) {
+            {
+                std::lock_guard<std::mutex> lk(iq_mutex);
+                while (!iq_queue.empty()) {
+                    auto &blk = iq_queue.front();
+                    iq_accum.insert(iq_accum.end(), blk.begin(), blk.end());
+                    iq_queue.pop_front();
+                }
+            }
+
+            int cur_mode = mode.load();
+            if (!active.load() || cur_mode==(int)Mode::NONE) {
+                iq_accum.clear(); rd_idx=0;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
+
+            float rel_hz = sel_rel_mhz.load()*1e6f;
+            float bw_hz  = sel_bw_mhz.load()*1e6f;
+            float sr     = sample_rate;
+
+            int dec1, dec2;
+            float chan_fc, audio_fc, deemph_a;
+            if (cur_mode==(int)Mode::WFM) {
+                dec1=256; dec2=5;
+                float qr=sr/dec1;
+                chan_fc  = std::min(bw_hz*.5f,100e3f)/qr;
+                audio_fc = 15e3f/qr;
+                deemph_a = expf(-1.f/(75e-6f*qr));
+            } else if (cur_mode==(int)Mode::NFM) {
+                dec1=256; dec2=5;
+                float qr=sr/dec1;
+                chan_fc  = std::min(bw_hz*.5f,12.5e3f)/qr;
+                audio_fc = 4e3f/qr;
+                deemph_a = 0;
+            } else {
+                dec1=(int)(sr/AUDIO_RATE); dec2=1;
+                float qr=sr/dec1;
+                chan_fc  = std::min(bw_hz*.5f,5e3f)/qr;
+                audio_fc = 4e3f/qr;
+                deemph_a = 0;
+            }
+
+            if (cur_mode!=mode_prev || dec1!=dec1_prev || dec2!=dec2_prev) {
+                fprintf(stderr,"[DEMOD] reset mode=%d dec1=%d dec2=%d\n",cur_mode,dec1,dec2);
+                chan_lpf.reset(); audio_lpf.reset(); deemph.reset(); dc_block.reset();
+                prev_i=prev_q=am_dc=0;
+                nco=cf(1,0); last_rel_hz=1e30f;
+                iq_accum.clear(); rd_idx=0;
+                mode_prev=cur_mode; dec1_prev=dec1; dec2_prev=dec2;
+            }
+
+            if (fabsf(rel_hz-last_rel_hz)>1.f) {
+                float pi=-2.f*(float)M_PI*rel_hz/sr;
+                nco_inc=cf(cosf(pi),sinf(pi));
+                last_rel_hz=rel_hz;
+            }
+
+            float qrate = sr/dec1;
+            chan_lpf.lpf(chan_fc);
+            audio_lpf.lpf(audio_fc / 0.435f);
+            dc_block.hpf(20.f/qrate);
+
+            int avail = (int)iq_accum.size() - rd_idx;
+            if (avail < dec1) {
+                if (rd_idx > 0) {
+                    int rem=(int)iq_accum.size()-rd_idx;
+                    if(rem>0) memmove(iq_accum.data(),iq_accum.data()+rd_idx,rem*sizeof(cf));
+                    iq_accum.resize(rem); rd_idx=0;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                continue;
+            }
+
+            int max_proc = (int)(sr*0.02f);
+            int n_proc   = std::min(avail, max_proc);
+            n_proc = (n_proc/dec1)*dec1;
+            if (n_proc <= 0) { std::this_thread::sleep_for(std::chrono::microseconds(100)); continue; }
+
+            int n1    = n_proc/dec1;
+            int out_n = (n1+dec2-1)/dec2;
+
+            dbg_processed.fetch_add(1);
+            int proc = dbg_processed.load();
+            if (proc%500==1)
+                fprintf(stderr,"[DEMOD] blk#%d mode=%d n_proc=%d out=%d q=%d\n",
+                        proc,cur_mode,n_proc,out_n,(int)iq_queue.size());
+
+            // 1. NCO + 채널 LPF + dec1
+            std::vector<cf> ch(n1);
+            for (int i=0; i<n_proc; i++) {
+                cf x = iq_accum[rd_idx+i];
+                cf rx = {x.real()*nco.real()-x.imag()*nco.imag(),
+                         x.real()*nco.imag()+x.imag()*nco.real()};
+                float nr=nco.real()*nco_inc.real()-nco.imag()*nco_inc.imag();
+                float ni=nco.real()*nco_inc.imag()+nco.imag()*nco_inc.real();
+                nco={nr,ni};
+                if((i&1023)==0){float m=sqrtf(nr*nr+ni*ni);if(m>0)nco/=m;}
+                rx = chan_lpf.process(rx);
+                if(i%dec1==0) ch[i/dec1]=rx;
+            }
+            rd_idx += n_proc;
+
+            // 2. 복조
+            std::vector<float> demod1(n1);
+            if (cur_mode==(int)Mode::AM) {
+                for(int i=0;i<n1;i++){
+                    float env=sqrtf(ch[i].real()*ch[i].real()+ch[i].imag()*ch[i].imag());
+                    am_dc=0.9999f*am_dc+0.0001f*env;
+                    demod1[i]=env-am_dc;
+                }
+            } else {
+                float pi_=prev_i, pq_=prev_q;
+                for(int i=0;i<n1;i++){
+                    float fi=ch[i].real(), fq=ch[i].imag();
+                    float d=fq*pi_-fi*pq_;
+                    float m=fi*fi+fq*fq;
+                    float fm=(m>1e-12f)?d/m:0.f;
+                    if(deemph_a>0) fm=(1.f-deemph_a)*fm+deemph_a*(i>0?demod1[i-1]:fm);
+                    demod1[i]=fm;
+                    pi_=fi; pq_=fq;
+                }
+                prev_i=ch[n1-1].real(); prev_q=ch[n1-1].imag();
+            }
+
+            // 3. 오디오 LPF + dec2 → audio_buf
+            float fm_norm;
+            if      (cur_mode==(int)Mode::WFM) fm_norm=0.509f;
+            else if (cur_mode==(int)Mode::NFM) fm_norm=3.0f;
+            else                               fm_norm=1.0f;
+            float vol = volume.load()*0.8f*fm_norm;
+
+            audio_buf.clear();
+            for(int i=0;i<n1;i++){
+                float v=audio_lpf.process(demod1[i]);
+                if(i%dec2==0){
+                    if(cur_mode!=(int)Mode::WFM) v=dc_block.process(v);
+                    audio_buf.push_back(std::max(-1.f,std::min(1.f,v*vol)));
+                }
+            }
+
+            // 4. PA 직접 write (blocking → rate control)
+            // audio_buf → alsa_accum 누적
+            alsa_accum.insert(alsa_accum.end(), audio_buf.begin(), audio_buf.end());
+
+            // ALSA_PERIOD(480샘플) 단위로 write → underrun 방지
+            while ((int)alsa_accum.size() >= ALSA_PERIOD) {
+                const float *ptr = alsa_accum.data();
+                int ret = snd_pcm_writei(alsa_pcm, ptr, ALSA_PERIOD);
+                if (ret == -EPIPE) {
+                    snd_pcm_prepare(alsa_pcm);
+                } else if (ret < 0) {
+                    snd_pcm_recover(alsa_pcm, ret, 1);
+                } else {
+                    alsa_accum.erase(alsa_accum.begin(), alsa_accum.begin() + ALSA_PERIOD);
+                }
+            }
+
+            // compact
+            if(rd_idx>(int)iq_accum.size()/2){
+                int rem=(int)iq_accum.size()-rd_idx;
+                if(rem>0) memmove(iq_accum.data(),iq_accum.data()+rd_idx,rem*sizeof(cf));
+                iq_accum.resize(rem); rd_idx=0;
+            }
+        }
+
+        snd_pcm_drain(alsa_pcm);
+        snd_pcm_close(alsa_pcm);
+        fprintf(stderr,"[ALSA] closed\n");
+    }
+};
 
 class FFTViewer {
 public:
@@ -115,6 +432,16 @@ public:
     float pending_center_freq = 0.0f;
     bool freq_change_requested = false;
     bool freq_change_in_progress = false;
+
+    IQDemodulator *demodulator = nullptr;  // run_streaming_viewer에서 설정
+
+    // 복조 채널 선택 UI 상태
+    bool   demod_dragging = false;
+    float  demod_drag_start_x = 0.0f;   // 화면 픽셀
+    float  demod_sel_x0 = -1.0f;        // 화면 픽셀 (좌)
+    float  demod_sel_x1 = -1.0f;        // 화면 픽셀 (우)
+    float  demod_sel_freq0 = 0.0f;      // 절대 MHz
+    float  demod_sel_freq1 = 0.0f;      // 절대 MHz
     
     enum ColorMapType { COLORMAP_JET = 0, COLORMAP_COOL = 1, COLORMAP_HOT = 2, COLORMAP_VIRIDIS = 3 };
     ColorMapType color_map = COLORMAP_COOL;
@@ -204,7 +531,7 @@ public:
         
         // ✅ 고정 dBFS 범위: -80 dB ~ 0 dB
         display_power_min = -80.0f;
-        display_power_max = 0.0f;
+        display_power_max = -20.0f;
         
         fft_in = fftwf_alloc_complex(fft_size);
         fft_out = fftwf_alloc_complex(fft_size);
@@ -386,6 +713,7 @@ public:
                         std::lock_guard<std::mutex> lock(data_mutex);
                         header.center_frequency = static_cast<uint64_t>(pending_center_freq * 1e6);
                     }
+                    if (demodulator) demodulator->sel_rel_mhz.store(0.0f);
                     printf("Frequency changed to: %.2f MHz\n", pending_center_freq);
                     char title[256];
                     snprintf(title, sizeof(title), "Real-time FFT Viewer - %.2f MHz", pending_center_freq);
@@ -394,6 +722,11 @@ public:
                     autoscale_accum.clear();
                     autoscale_initialized = false;
                     autoscale_active = true;
+                    // 주파수 변경 후 demod IQ 큐 플러시 (이전 주파수 오염 데이터 제거)
+                    if (demodulator) {
+                        std::lock_guard<std::mutex> lk(demodulator->iq_mutex);
+                        demodulator->iq_queue.clear();
+                    }
                 } else {
                     fprintf(stderr, "Failed to change frequency: %s\n", bladerf_strerror(status));
                 }
@@ -405,6 +738,11 @@ public:
             if (status != 0) {
                 fprintf(stderr, "RX error: %s\n", bladerf_strerror(status));
                 continue;
+            }
+
+            // 복조기에 원시 IQ 전달
+            if (demodulator) {
+                demodulator->push_iq(iq_buffer, fft_size);
             }
 
             for (int i = 0; i < fft_size; i++) {
@@ -791,7 +1129,67 @@ public:
             freq_pan = (new_start + effective_nyquist_local) / total_range_local;
             freq_pan = std::max(0.0f, std::min(1.0f - 1.0f / freq_zoom, freq_pan));
         }
-        
+
+        // ── 복조 범위 드래그 선택 (오른쪽 버튼) ──────────────────
+        {
+            float nyquist_l = header.sample_rate / 2.0f / 1e6f;
+            float eff_nyq   = nyquist_l * 0.875f;
+            float tot_range = 2.0f * eff_nyq;
+            float ds        = -eff_nyq + freq_pan * tot_range;
+            float de        = ds + tot_range / freq_zoom;
+
+            auto px_to_abs = [&](float px_) -> float {
+                float norm = (px_ - graph_x) / graph_w;
+                norm = std::max(0.0f, std::min(1.0f, norm));
+                return ds + norm * (de - ds) + header.center_frequency / 1e6f;
+            };
+
+            ImVec2 mouse = ImGui::GetMousePos();
+
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                demod_dragging     = true;
+                demod_drag_start_x = mouse.x;
+                demod_sel_x0 = mouse.x;
+                demod_sel_x1 = mouse.x;
+            }
+            if (demod_dragging) {
+                demod_sel_x1 = mouse.x;
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+                    demod_dragging = false;
+                    float f0 = px_to_abs(std::min(demod_sel_x0, demod_sel_x1));
+                    float f1 = px_to_abs(std::max(demod_sel_x0, demod_sel_x1));
+                    demod_sel_freq0 = f0;
+                    demod_sel_freq1 = f1;
+                    if (demodulator) {
+                        float cf = header.center_frequency / 1e6f;
+                        demodulator->sel_rel_mhz.store((f0 + f1) / 2.0f - cf);
+                        demodulator->sel_bw_mhz.store(std::max(0.01f, f1 - f0));
+                    }
+                }
+            }
+
+            // 선택 영역 반투명 표시
+            if (demod_sel_x0 >= 0 && demod_sel_x1 >= 0) {
+                float sx0 = std::max(std::min(demod_sel_x0, demod_sel_x1), graph_x);
+                float sx1 = std::min(std::max(demod_sel_x0, demod_sel_x1), graph_x + graph_w);
+                if (sx1 > sx0) {
+                    draw_list->AddRectFilled(ImVec2(sx0, graph_y), ImVec2(sx1, graph_y + graph_h),
+                                             IM_COL32(255, 200, 0, 40));
+                    draw_list->AddRect(ImVec2(sx0, graph_y), ImVec2(sx1, graph_y + graph_h),
+                                       IM_COL32(255, 200, 0, 180));
+                    if (demod_sel_freq1 > demod_sel_freq0) {
+                        char bw_label[32];
+                        float bw = demod_sel_freq1 - demod_sel_freq0;
+                        if (bw < 1.0f) snprintf(bw_label, sizeof(bw_label), "%.0f kHz", bw * 1000.0f);
+                        else           snprintf(bw_label, sizeof(bw_label), "%.3f MHz", bw);
+                        ImVec2 ts = ImGui::CalcTextSize(bw_label);
+                        draw_list->AddText(ImVec2((sx0+sx1)/2.0f - ts.x/2.0f, graph_y + 4),
+                                           IM_COL32(255, 220, 0, 255), bw_label);
+                    }
+                }
+            }
+        }
+
         // Y축 드래그로 power_min/max 조절
         ImGui::SetCursorScreenPos(ImVec2(pos.x, graph_y));
         ImGui::InvisibleButton("power_axis_drag", ImVec2(AXIS_LABEL_WIDTH, graph_h));
@@ -1015,6 +1413,10 @@ void run_streaming_viewer() {
 
     std::thread capture_thread(&FFTViewer::capture_and_process, &viewer);
 
+    IQDemodulator demodulator;
+    demodulator.start(sample_rate * 1e6f);
+    viewer.demodulator = &demodulator;
+
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -1101,6 +1503,73 @@ void run_streaming_viewer() {
                 }
                 ImGui::EndCombo();
             }
+
+            // ── 복조 패널 ──────────────────────────────────────────
+            if (viewer.demodulator) {
+                ImGui::SameLine(); ImGui::Spacing(); ImGui::SameLine();
+                ImGui::Separator(); ImGui::SameLine();
+
+                IQDemodulator *dm = viewer.demodulator;
+                int cur_mode = dm->mode.load();
+                bool is_active = dm->active.load();
+
+                // AM 버튼
+                // AM 버튼
+                bool am_on = is_active && cur_mode == (int)IQDemodulator::Mode::AM;
+                if (am_on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
+                if (ImGui::Button("AM")) {
+                    if (am_on) { dm->active.store(false); dm->mode.store((int)IQDemodulator::Mode::NONE); }
+                    else        { dm->mode.store((int)IQDemodulator::Mode::AM); dm->active.store(true); }
+                }
+                if (am_on) ImGui::PopStyleColor();
+
+                ImGui::SameLine();
+
+                // WFM 버튼 (광대역 FM, 최대 200kHz)
+                bool wfm_on = is_active && cur_mode == (int)IQDemodulator::Mode::WFM;
+                if (wfm_on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
+                if (ImGui::Button("WFM")) {
+                    if (wfm_on) { dm->active.store(false); dm->mode.store((int)IQDemodulator::Mode::NONE); }
+                    else         { dm->mode.store((int)IQDemodulator::Mode::WFM); dm->active.store(true); }
+                }
+                if (wfm_on) ImGui::PopStyleColor();
+
+                ImGui::SameLine();
+
+                // NFM 버튼 (협대역 FM, 최대 25kHz)
+                bool nfm_on = is_active && cur_mode == (int)IQDemodulator::Mode::NFM;
+                if (nfm_on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.4f, 0.9f, 1.0f));
+                if (ImGui::Button("NFM")) {
+                    if (nfm_on) { dm->active.store(false); dm->mode.store((int)IQDemodulator::Mode::NONE); }
+                    else         { dm->mode.store((int)IQDemodulator::Mode::NFM); dm->active.store(true); }
+                }
+                if (nfm_on) ImGui::PopStyleColor();
+
+                ImGui::SameLine(); ImGui::Spacing(); ImGui::SameLine();
+
+                // 볼륨 슬라이더
+                ImGui::Text("Vol:"); ImGui::SameLine();
+                ImGui::SetNextItemWidth(80);
+                float vol = dm->volume.load();
+                if (ImGui::SliderFloat("##vol", &vol, 0.0f, 4.0f, "%.1f"))
+                    dm->volume.store(vol);
+
+                // 현재 선택 주파수 표시
+                if (is_active && viewer.demod_sel_freq1 > viewer.demod_sel_freq0) {
+                    ImGui::SameLine(); ImGui::Spacing(); ImGui::SameLine();
+                    char sel_info[64];
+                    float bw = viewer.demod_sel_freq1 - viewer.demod_sel_freq0;
+                    float cf = (viewer.demod_sel_freq0 + viewer.demod_sel_freq1) / 2.0f;
+                    if (bw < 1.0f)
+                        snprintf(sel_info, sizeof(sel_info), "%.3f MHz / BW %.0f kHz", cf, bw*1000.0f);
+                    else
+                        snprintf(sel_info, sizeof(sel_info), "%.3f MHz / BW %.3f MHz", cf, bw);
+                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f), "%s", sel_info);
+                } else if (!is_active) {
+                    ImGui::SameLine(); ImGui::Spacing(); ImGui::SameLine();
+                    ImGui::TextDisabled("Right-drag spectrum to select");
+                }
+            }
             
             ImGui::PopStyleVar(2);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1150,6 +1619,7 @@ void run_streaming_viewer() {
 
     viewer.is_running = false;
     capture_thread.join();
+    demodulator.stop();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -1162,4 +1632,11 @@ void run_streaming_viewer() {
 int main() {
     run_streaming_viewer();
     return 0;
+}
+
+// BUILD VERSION
+// v1.7
+static const char* BUILD_VERSION = "v1.7";
+static void __attribute__((constructor)) print_version() {
+    fprintf(stderr, "[VERSION] streaming_viewer %s\n", BUILD_VERSION);
 }

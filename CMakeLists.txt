@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(BLADERF REQUIRED libbladeRF)
 pkg_check_modules(FFTW REQUIRED fftw3f)
+pkg_check_modules(ALSA REQUIRED alsa)
 
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
@@ -33,6 +34,7 @@ add_executable(fft_analyzer
 target_include_directories(fft_analyzer PRIVATE
     ${BLADERF_INCLUDE_DIRS}
     ${FFTW_INCLUDE_DIRS}
+    ${ALSA_INCLUDE_DIRS}
     ${IMGUI_PATH}
     ${IMGUI_BACKENDS_PATH}
 )
@@ -40,6 +42,7 @@ target_include_directories(fft_analyzer PRIVATE
 target_link_libraries(fft_analyzer PRIVATE
     ${BLADERF_LIBRARIES}
     ${FFTW_LIBRARIES}
+    ${ALSA_LIBRARIES}
     OpenGL::GL
     GLEW::GLEW
     glfw
