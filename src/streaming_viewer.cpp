@@ -76,8 +76,6 @@ public:
     float display_power_min = 0.0f;
     float display_power_max = 0.0f;
     float spectrum_height_ratio = 0.2f;
-    float last_wf_power_min = -9999.0f;  // 워터폴 전체 재계산 감지용
-    float last_wf_power_max = -9999.0f;
     
     bool is_playing = false;
     bool is_looping = false;
@@ -370,8 +368,6 @@ public:
                     total_ffts_captured = 0;
                     current_fft_idx = 0;
                     cached_spectrum_idx = -1;
-                    last_wf_power_min = -9999.0f;
-                    last_wf_power_max = -9999.0f;
                     autoscale_accum.clear();
                     autoscale_initialized = false;
                     autoscale_active = true;
@@ -476,8 +472,6 @@ public:
                             display_power_min = p15 - 10.0f;
                             autoscale_accum.clear();
                             autoscale_active = false;  // 1회 갱신 후 비활성
-                            last_wf_power_min = -9999.0f;
-                            last_wf_power_max = -9999.0f;
                             cached_spectrum_idx = -1;
                         }
                     }
@@ -849,11 +843,6 @@ public:
                 cached_spectrum_idx = -1;
             }
             
-            // 드래그 완료 시점에만 워터폴 전체 재계산 트리거
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-                last_wf_power_min = -9999.0f;
-                last_wf_power_max = -9999.0f;
-            }
         }
 
         ImGui::EndChild();
@@ -885,20 +874,8 @@ public:
             create_waterfall_texture();
         }
         
-        // 실제 FFT 데이터가 존재할 때만 워터폴 업데이트
-        bool range_changed = (last_wf_power_min != display_power_min || last_wf_power_max != display_power_max);
-        
-        if (range_changed && total_ffts_captured > 0) {
-            // dB 범위가 바뀌면 모든 기존 rows 재계산
-            int num_stored = std::min(total_ffts_captured, MAX_FFTS_MEMORY);
-            for (int i = 0; i < num_stored; i++) {
-                int fft_idx = (current_fft_idx - num_stored + 1 + i + MAX_FFTS_MEMORY * 2) % MAX_FFTS_MEMORY;
-                update_waterfall_row(fft_idx);
-            }
-            last_wf_power_min = display_power_min;
-            last_wf_power_max = display_power_max;
-            last_waterfall_update_idx = current_fft_idx;
-        } else if (total_ffts_captured > 0 && last_waterfall_update_idx != current_fft_idx) {
+        // 새 FFT row만 현재 display_power_min/max 기준으로 색상 계산
+        if (total_ffts_captured > 0 && last_waterfall_update_idx != current_fft_idx) {
             update_waterfall_row(current_fft_idx);
             last_waterfall_update_idx = current_fft_idx;
         }
@@ -919,21 +896,25 @@ public:
             float u_start = (disp_start + nyquist) / (2.0f * nyquist);
             float u_end = (disp_end + nyquist) / (2.0f * nyquist);
             
-            float v_offset = (float)(current_fft_idx % MAX_FFTS_MEMORY) / MAX_FFTS_MEMORY;
-            float v_end = v_offset;
-            float v_start = v_end + (float)display_rows / MAX_FFTS_MEMORY;
+            float v_newest = (float)(current_fft_idx % MAX_FFTS_MEMORY) / MAX_FFTS_MEMORY;
+            // 화면 상단 = 최신, 화면 하단 = 오래된 데이터
+            // v축: 최신 row부터 display_rows만큼 거슬러 올라감
+            float v_top    = v_newest + 1.0f / MAX_FFTS_MEMORY;  // 최신 row 바로 다음(상단)
+            float v_bottom = v_top - (float)display_rows / MAX_FFTS_MEMORY;
+            // GL_TEXTURE_WRAP_T = REPEAT 이므로 음수 UV도 wrap됨
             
-            // 실제 데이터가 있는 픽셀 높이만큼만 그림
-            // display_rows가 graph_h보다 작으면 상단 일부만 채움
+            // 실제 데이터 높이만큼만 그림 (초기 검은창 방지)
             float draw_h = (display_rows >= (int)graph_h)
                 ? graph_h
-                : (float)display_rows;  // 1 row = 1px
+                : (float)display_rows;
+            // draw_h에 맞게 v_bottom 재조정
+            float v_draw_bottom = v_top - (float)display_rows / MAX_FFTS_MEMORY;
             
             draw_list->AddImage(tex_id,
                                ImVec2(graph_x, graph_y),
                                ImVec2(graph_x + graph_w, graph_y + draw_h),
-                               ImVec2(u_start, v_start),
-                               ImVec2(u_end, v_end),
+                               ImVec2(u_start, v_top),
+                               ImVec2(u_end,   v_draw_bottom),
                                IM_COL32(255, 255, 255, 255));
         }
         
