@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
-#define RX_GAIN                30
+#define RX_GAIN                10
 #define CHANNEL                BLADERF_CHANNEL_RX(0)
 #define DEFAULT_FFT_SIZE       8192
 #define TIME_AVERAGE           50
@@ -255,6 +255,7 @@ public:
     // Channels
     Channel channels[MAX_CHANNELS];
     int     selected_ch=-1;
+    bool    topbar_sel_this_frame=false; // prevent spectrum from overriding topbar selection
 
     // New-channel drag (right-drag creates channel)
     struct NewDrag{ bool active=false; float anch=0,s=0,e=0; } new_drag;
@@ -264,6 +265,7 @@ public:
     std::thread           rec_thr;
     std::atomic<size_t>   rec_rp{0};
     float                 rec_cf_mhz=0; uint32_t rec_sr=0;
+    int                   rec_ch=-1; // channel index being recorded
     std::string           rec_filename;
     std::atomic<uint64_t> rec_frames{0};
     std::chrono::steady_clock::time_point rec_t0;
@@ -463,11 +465,12 @@ public:
 
     void start_rec(){
         if(rec_on.load()) return;
-        // Count active filters - multi-channel: disabled
-        int n_filters=0,last_fi=-1;
-        for(int i=0;i<MAX_CHANNELS;i++) if(channels[i].filter_active){n_filters++;last_fi=i;}
-        if(n_filters!=1){printf("REC: need exactly 1 channel (currently %d)\n",n_filters);return;}
-        Channel& ch=channels[last_fi];
+        // Record the currently selected channel
+        int fi=selected_ch;
+        if(fi<0||!channels[fi].filter_active){
+            printf("REC: no active channel selected\n"); return;
+        }
+        Channel& ch=channels[fi];
         float ss=std::min(ch.s,ch.e),se=std::max(ch.s,ch.e);
         rec_cf_mhz=(ss+se)/2.0f; float bw_hz=(se-ss)*1e6f;
         rec_sr=optimal_iq_sr(header.sample_rate,bw_hz);
@@ -475,10 +478,11 @@ public:
         char fn[256]; snprintf(fn,256,"iq_%.4fMHz_BW%.0fkHz_%04d%02d%02d_%02d%02d%02d.wav",
                  rec_cf_mhz,bw_hz/1000.0f,tm2.tm_year+1900,tm2.tm_mon+1,tm2.tm_mday,tm2.tm_hour,tm2.tm_min,tm2.tm_sec);
         rec_filename=fn; rec_frames.store(0); rec_rp.store(ring_wp.load());
+        rec_ch=fi;
         rec_stop.store(false); rec_on.store(true);
         rec_t0=std::chrono::steady_clock::now();
         rec_thr=std::thread(&FFTViewer::rec_worker,this);
-        printf("REC start → %s  SR=%u\n",fn,rec_sr);
+        printf("REC start ch%d → %s  SR=%u\n",fi,fn,rec_sr);
     }
     void stop_rec(){
         if(!rec_on.load()) return;
@@ -502,7 +506,8 @@ public:
 
         Oscillator osc; osc.set_freq((double)off_hz,(double)msr);
         double cap_i=0,cap_q=0; int cap_cnt=0;
-        IIR1 lpi,lpq; lpi.set(0.45/actual_ad); lpq.set(0.45/actual_ad);
+        IIR1 lpi,lpq;
+        { float cn=(bw_hz*0.5f)/(float)actual_inter; if(cn>0.45f)cn=0.45f; lpi.set(cn); lpq.set(cn); }
         float prev_i=0,prev_q=0,am_dc=0;
         IIR1 alf; alf.set(8000.0/actual_inter);
         double aac=0; int acnt=0;
@@ -513,10 +518,10 @@ public:
         // then set threshold = noise_floor + 10dB (user can adjust after)
         const float SQL_ALPHA     = 0.05f; // EMA ~20 samples
         const int   SQL_HOLD_SAMP = 0;     // 0ms hold: instant close
-        const int   CALIB_SAMP    = (int)(actual_inter * 0.500f); // 500ms calibration
+        const int   CALIB_SAMP    = (int)(actual_inter * 0.500f);
         float sql_avg    = -120.0f;
-        float calib_acc  = 0.0f;
-        int   calib_cnt  = 0;
+        std::vector<float> calib_buf;
+        calib_buf.reserve(CALIB_SAMP);
         bool  calibrated = false;
         bool  gate_open  = false;
         int   gate_hold  = 0;
@@ -557,13 +562,19 @@ public:
                 float db_inst = (p_inst > 1e-12f) ? 10.0f*log10f(p_inst) : -120.0f;
                 sql_avg = SQL_ALPHA*db_inst + (1.0f-SQL_ALPHA)*sql_avg;
 
-                // 2) Auto-calibrate threshold on first 500ms
+                // 2) Auto-calibrate threshold on first 500ms (20th percentile of dB)
                 if(!calibrated){
-                    calib_acc += db_inst;
-                    if(++calib_cnt >= CALIB_SAMP){
-                        float noise_floor = calib_acc / calib_cnt;
+                    if((int)calib_buf.size() < CALIB_SAMP)
+                        calib_buf.push_back(db_inst);
+                    if((int)calib_buf.size() >= CALIB_SAMP){
+                        // 20th percentile: robust noise floor, ignores rare deep dips
+                        std::vector<float> tmp=calib_buf;
+                        size_t p20=tmp.size()/5;
+                        std::nth_element(tmp.begin(),tmp.begin()+p20,tmp.end());
+                        float noise_floor=tmp[p20];
                         ch.sq_threshold.store(noise_floor + 10.0f, std::memory_order_relaxed);
                         calibrated = true;
+                        calib_buf.clear(); calib_buf.shrink_to_fit();
                     }
                 }
 
@@ -732,9 +743,10 @@ public:
 
     // ── Channel click / double-click / drag-move ──────────────────────────
     // Call this after the InvisibleButton on the graph
-    void handle_channel_interactions(float gx,float gw){
+    void handle_channel_interactions(float gx,float gw,float gy,float gh){
         ImVec2 m=ImGui::GetIO().MousePos;
         if(m.x<gx||m.x>gx+gw) return;
+        bool in_graph=(m.y>=gy&&m.y<=gy+gh);
 
         // Check if any channel move-drag active (left button held)
         bool any_move=false;
@@ -753,13 +765,22 @@ public:
                     channels[i].s=new_cf-half_bw; channels[i].e=new_cf+half_bw;
                 }
             } else {
-                for(int i=0;i<MAX_CHANNELS;i++) channels[i].move_drag=false;
+                // Drag ended: restart demod with new center frequency
+                for(int i=0;i<MAX_CHANNELS;i++){
+                    if(!channels[i].move_drag) continue;
+                    channels[i].move_drag=false;
+                    if(channels[i].dem_run.load()){
+                        Channel::DemodMode m=channels[i].mode;
+                        stop_dem(i);
+                        start_dem(i,m);
+                    }
+                }
             }
             return;
         }
 
         // Double-click: delete channel
-        if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){
+        if(in_graph && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){
             int ci=channel_at_x(m.x,gx,gw);
             if(ci>=0){
                 stop_dem(ci);
@@ -772,13 +793,11 @@ public:
         }
 
         // Single left-click
-        if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
+        if(in_graph && ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
             int ci=channel_at_x(m.x,gx,gw);
-            // Deselect old
             if(selected_ch>=0) channels[selected_ch].selected=false;
             if(ci>=0){
                 selected_ch=ci; channels[ci].selected=true;
-                // Start drag-move
                 channels[ci].move_drag=true;
                 channels[ci].move_anchor=x_to_abs(m.x,gx,gw);
                 channels[ci].move_s0=std::min(channels[ci].s,channels[ci].e);
@@ -815,7 +834,7 @@ public:
 
             ImU32 fill=ch.selected?CH_SFIL[i]:CH_FILL[i];
             ImU32 bord=CH_BORD[i];
-            if(rec_on.load()&&i==selected_ch) fill=IM_COL32(255,60,60,60);
+            if(rec_on.load()&&i==rec_ch) fill=IM_COL32(255,60,60,60);
 
             dl->AddRectFilled(ImVec2(c0,gy),ImVec2(c1,gy+gh),fill);
             // Dashed border
@@ -838,7 +857,7 @@ public:
             const char* pname[]={" L"," L+R"," R"}; // pan -1,0,1
             int pi=ch.pan+1; if(pi<0)pi=0; if(pi>2)pi=2;
             char lb[128];
-            if(rec_on.load()&&i==selected_ch)
+            if(rec_on.load()&&i==rec_ch)
                 snprintf(lb,sizeof(lb),"[%d] REC %.3fMHz / %.1fkHz",i+1,(ss+se)/2.0f,(se-ss)*1000.0f);
             else
                 snprintf(lb,sizeof(lb),"[%d]%s%s %.3fMHz / %.1fkHz",
@@ -934,7 +953,7 @@ public:
         ImGui::InvisibleButton("sp_graph",ImVec2(gw,gh));
         bool hov=ImGui::IsItemHovered();
         handle_new_channel_drag(gx,gw);
-        handle_channel_interactions(gx,gw);
+        handle_channel_interactions(gx,gw,gy,gh);
         if(hov){
             ImVec2 mm=ImGui::GetIO().MousePos;
             float af=x_to_abs(mm.x,gx,gw);
@@ -993,7 +1012,7 @@ public:
         ImGui::InvisibleButton("wf_graph",ImVec2(gw,gh));
         bool hov=ImGui::IsItemHovered();
         handle_new_channel_drag(gx,gw);
-        handle_channel_interactions(gx,gw);
+        handle_channel_interactions(gx,gw,gy,gh);
         if(hov){
             ImVec2 mm=ImGui::GetIO().MousePos;
             float af=x_to_abs(mm.x,gx,gw);
@@ -1032,6 +1051,7 @@ void run_streaming_viewer(){
     while(!glfwWindowShouldClose(win)){
         glfwPollEvents();
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
+        v.topbar_sel_this_frame=false;
         if(v.texture_needs_recreate){v.texture_needs_recreate=false;v.create_waterfall_texture();}
 
         ImGuiIO& io=ImGui::GetIO();
@@ -1220,19 +1240,23 @@ void run_streaming_viewer(){
                 ImVec2 cs2=ImGui::CalcTextSize(cb); rx-=cs2.x;
                 ImU32 tc=ch.sq_gate.load()?CH_BORD[i]:IM_COL32(160,160,160,255);
 
-                // InvisibleButton over text area for double-click
-                ImGui::SetCursorScreenPos(ImVec2(rx, 0));
-                char btn_id[16]; snprintf(btn_id,sizeof(btn_id),"##rch%d",i);
-                ImGui::InvisibleButton(btn_id, ImVec2(cs2.x, TOPBAR_H));
-                if(ImGui::IsItemHovered()){
-                    tc=IM_COL32(255,255,255,255); // hover highlight
-                    ImGui::SetTooltip("double-click to remove");
+                // Manual hit test (right-to-left layout breaks InvisibleButton)
+                ImVec2 mpos=ImGui::GetIO().MousePos;
+                bool hovered=(mpos.x>=rx && mpos.x<rx+cs2.x && mpos.y>=0 && mpos.y<TOPBAR_H);
+                if(hovered){
+                    tc=IM_COL32(255,255,255,255);
+                    ImGui::SetTooltip("click to select  double-click to remove");
                     if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){
                         v.stop_dem(i);
                         v.channels[i].filter_active=false;
                         v.channels[i].selected=false;
                         v.channels[i].mode=Channel::DM_NONE;
                         if(v.selected_ch==i) v.selected_ch=-1;
+                    } else if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
+                        if(v.selected_ch>=0) v.channels[v.selected_ch].selected=false;
+                        v.selected_ch=i; v.channels[i].selected=true;
+                        v.topbar_sel_this_frame=true;
+                        printf("TOPBAR click ch%d selected_ch=%d\n",i,v.selected_ch);
                     }
                 }
                 dl->AddText(ImVec2(rx,ty2),tc,cb);
