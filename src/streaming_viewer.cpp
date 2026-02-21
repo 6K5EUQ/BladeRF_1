@@ -25,7 +25,7 @@
 #define RX_GAIN                10
 #define CHANNEL                BLADERF_CHANNEL_RX(0)
 #define DEFAULT_FFT_SIZE       8192
-#define TIME_AVERAGE           50
+#define TIME_AVERAGE           200
 #define MAX_FFTS_MEMORY        1000
 #define HANN_WINDOW_CORRECTION 2.67f
 #define AXIS_LABEL_WIDTH       50
@@ -544,9 +544,16 @@ public:
         IIR1 lpi,lpq;
         { float cn=(bw_hz*0.5f)/(float)actual_inter; if(cn>0.45f)cn=0.45f; lpi.set(cn); lpq.set(cn); }
         float prev_i=0,prev_q=0,am_dc=0;
+        // DC 차단 계수: 30Hz 기준으로 샘플레이트에 맞게 계산
+        float am_dc_alpha=1.0f-expf(-2.0f*M_PI*30.0f/(float)actual_inter);
         IIR1 alf; alf.set(8000.0/actual_inter);
+        // AM AGC: 출력 RMS 추적 → FM 수준(0.1 RMS)으로 정규화
+        float agc_rms=0.01f;        // 현재 추정 RMS
+        const float AGC_TARGET=1.0f;
+        const float AGC_ATTACK =0.001f;
+        const float AGC_RELEASE=0.0001f;
         double aac=0; int acnt=0;
-        size_t aac_detect_pos=0; // alert PCM playback position for DM_DETECT
+        size_t aac_detect_pos=0;
 
         // ── Squelch ───────────────────────────────────────────────────────
         // sql_avg: EMA-smoothed signal level (dBFS)
@@ -653,8 +660,16 @@ public:
                 float samp=0;
                 if(mode==Channel::DM_AM){
                     float env2=sqrtf(p_inst);
-                    am_dc=am_dc*0.9995f+env2*0.0005f;
-                    samp=alf.p(env2-am_dc)*8.0f;
+                    // DC 제거: 샘플레이트 기반 정확한 HPF
+                    am_dc += am_dc_alpha*(env2-am_dc);
+                    float audio=alf.p(env2-am_dc);
+                    // AGC: 출력 RMS 추적 후 목표 레벨로 정규화
+                    float rms_in=audio*audio;
+                    if(rms_in>agc_rms) agc_rms+=(rms_in-agc_rms)*AGC_ATTACK;
+                    else               agc_rms+=(rms_in-agc_rms)*AGC_RELEASE;
+                    float gain=(agc_rms>1e-9f)?(AGC_TARGET/sqrtf(agc_rms)):100.0f;
+                    gain=std::min(gain,1000.0f);
+                    samp=std::max(-1.0f,std::min(1.0f,audio*gain));
                 } else {
                     float cross=fi*prev_q-fq*prev_i,dot=fi*prev_i+fq*prev_q;
                     float d=atan2f(cross,dot+1e-12f); prev_i=fi; prev_q=fq;
@@ -1409,7 +1424,13 @@ void run_streaming_viewer(){
                     snprintf(cb,sizeof(cb),"[%d] %.3f MHz @ %.0f kHz  ",
                              i+1,cf_mhz,bw_khz);
                 ImVec2 cs2=ImGui::CalcTextSize(cb); rx-=cs2.x;
-                ImU32 tc=ch.sq_gate.load()?CH_BORD[i]:IM_COL32(160,160,160,255);
+                bool is_selected=(v.selected_ch==i);
+                bool gate_open=ch.sq_gate.load();
+                ImU32 tc;
+                if(is_selected)
+                    tc=gate_open ? CH_BORD[i] : IM_COL32(255,255,255,255);
+                else
+                    tc=gate_open ? CH_BORD[i] : IM_COL32(160,160,160,255);
 
                 // Manual hit test (right-to-left layout breaks InvisibleButton)
                 ImVec2 mpos=ImGui::GetIO().MousePos;
@@ -1428,6 +1449,11 @@ void run_streaming_viewer(){
                         v.topbar_sel_this_frame=true;
                         printf("TOPBAR click ch%d selected_ch=%d\n",i,v.selected_ch);
                     }
+                }
+                // 선택된 채널: bold (1px 오프셋 이중 렌더링)
+                if(is_selected){
+                    dl->AddText(ImVec2(rx+1,ty2),IM_COL32(0,0,0,100),cb);
+                    dl->AddText(ImVec2(rx+1,ty2),tc,cb);
                 }
                 dl->AddText(ImVec2(rx,ty2),tc,cb);
             }
